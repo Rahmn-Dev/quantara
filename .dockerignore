@@ -1,0 +1,12 @@
+.git
+.venv
+.env
+db.sqlite3
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+staticfiles
+artifacts
+*.egg-info
+.DS_Store

@@ -1,0 +1,275 @@
+{% load static %}
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Quantara IDX - Dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{% static 'app.css' %}">
+  <link rel="stylesheet" href="{% static 'chart.css' %}">
+  <link rel="stylesheet" href="{% static 'workspace.css' %}">
+  <link rel="stylesheet" href="{% static 'mini.css' %}">
+  <link rel="stylesheet" href="{% static 'final.css' %}">
+  <link rel="stylesheet" href="{% static 'dashboard.css' %}">
+  <link rel="stylesheet" href="{% static 'dashboard-v2.css' %}?v=30">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body class="dark-dashboard">
+  <div class="full-dashboard-wrapper">
+    <div class="sticky-header-stack">
+    <!-- Top Header -->
+    <header class="top-nav">
+      <div class="brand"><span>Q</span><b>QUANTARA</b></div>
+      <div class="session-hub" aria-label="IDX regular market sessions">
+        <div class="market-clock-line"><span id="market-phase">Memuat jadwal BEI</span><strong id="market-timer">--:--:--</strong></div>
+        <div class="session-cards">
+          <div id="session-one" class="session-card"><span>SESI 1</span><b id="session-one-hours">09:00–12:00</b><small id="session-one-state">Menunggu</small></div>
+          <div id="session-two" class="session-card"><span>SESI 2</span><b id="session-two-hours">13:30–15:49</b><small id="session-two-state">Menunggu</small></div>
+        </div>
+      </div>
+      <div class="header-actions" style="display: flex; align-items: center; gap: 15px;">
+        <label class="gate-control" for="ml-threshold"><span>ML Gate</span>
+          <select id="ml-threshold" class="dark-input" aria-label="Minimum ML probability">
+            <option value="0.50">50%</option>
+            <option value="0.55">55%</option>
+            <option value="0.60">60%</option>
+            <option value="0.65" selected>65%</option>
+          </select>
+        </label>
+        <label style="color: var(--text-muted); font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 6px;">
+          <input type="checkbox" id="verbose-scan" style="accent-color: var(--accent-lime);"> Verbose
+        </label>
+        <button id="scan" class="action-btn">Run Market Scan</button>
+      </div>
+    </header>
+
+    <section class="market-tape" aria-label="IDX market movers">
+      <div class="tape-label"><i></i> IDX MOVERS</div>
+      <div class="tape-viewport">
+        <div id="market-tape-track" class="tape-track">
+          <span class="tape-loading">Loading market movement…</span>
+        </div>
+      </div>
+      <span class="tape-source">DAILY</span>
+    </section>
+    </div>
+
+    <main class="dashboard-grid">
+      <!-- Title Section -->
+      <section class="grid-header">
+        <div>
+          <p class="eyebrow">IDX DECISION INTELLIGENCE</p>
+          <h1>Good morning.</h1>
+          <p id="subtitle" class="text-muted">Your deterministic trading plan is loading.</p>
+        </div>
+      </section>
+
+      <!-- Top Metrics -->
+      <section class="metrics-panel widget-glass">
+        <article id="regime-card" class="metric-state"><label>MARKET REGIME</label><strong id="regime" class="neon-text">—</strong><small id="regime-note">Risk engine controls exposure</small></article>
+        <article><label>ACTIVE SETUPS</label><strong id="active" class="neon-text">0</strong><small>Ranked by measurable edge</small></article>
+        <article><label>DATA SOURCE</label><strong id="source" class="neon-text">—</strong><small id="freshness">No verified scan yet</small></article>
+        <article id="live-card" class="metric-state"><label>LIVE STATUS</label><strong id="live" class="neon-text">CONNECTING</strong><small>WebSocket event stream</small></article>
+        <article id="proof-card" class="metric-state"><label>HISTORY PROOF</label><strong id="proof-ratio" class="neon-text">—</strong><small id="proof-note">Waiting for evaluated calls</small></article>
+        <article id="quality-card" class="metric-state"><label>ENGINE QUALITY</label><strong id="engine-quality" class="neon-text">—</strong><small id="engine-quality-note">Conservative composite score</small></article>
+      </section>
+
+      <!-- Today's Playbook -->
+      <section class="board widget-glass span-col-8">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">TODAY'S PLAYBOOK</p>
+            <h2>Top 7 ranked setups</h2>
+          </div>
+          <div class="controls-right">
+            <label class="offline-toggle"><input id="offline" type="checkbox"> <span>Use cached data (offline)</span></label>
+            <span class="truth">Quant decides · Risk vetoes · AI explains</span>
+          </div>
+        </div>
+        <div id="plans" class="plans custom-scroll">
+          <div class="empty">No plan yet. Run the market scan.</div>
+        </div>
+      </section>
+
+      <!-- Chart Panel -->
+      <section class="chart-panel widget-glass span-col-4">
+        <div class="chart-heading">
+          <div>
+            <p class="eyebrow">PRICE ACTION</p>
+            <h2 id="chart-title">Select a candidate</h2>
+          </div>
+          <div id="chart-ranges" class="range-switcher" aria-label="Chart timeframe">
+            <button type="button" data-range="5d">5D</button>
+            <button type="button" data-range="1mo">1M</button>
+            <button type="button" data-range="3mo">3M</button>
+            <button type="button" data-range="1y" class="active">1Y</button>
+            <button type="button" data-range="5y">5Y</button>
+          </div>
+        </div>
+        <div id="chart" class="chart">
+          <div class="empty">Select a stock to inspect its last 120 daily candles.</div>
+        </div>
+      </section>
+
+      <!-- Live Trading Desk -->
+      <section class="board widget-glass span-col-4">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">FAST LIVE MARKET MONITOR</p>
+            <h2>Live Trading Desk</h2>
+          </div>
+          <div class="filters">
+            <input id="live-symbol" value="BBCA" maxlength="4" class="dark-input">
+            <button id="load-live" class="dark-btn">Load</button>
+          </div>
+        </div>
+        <p class="feed-warning text-muted"><span class="live-feed-dot"></span> Auto-refresh 5s · candle timeframe 5m · Yahoo best-effort/delayed</p>
+        <div id="live-decision"></div>
+        <div id="live-chart" class="chart"></div>
+      </section>
+
+      <!-- Market Scanner -->
+      <section class="board widget-glass span-col-8">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">FULL IDX UNIVERSE</p>
+            <h2>Market Scanner</h2>
+          </div>
+          <div class="filters">
+            <input id="stock-search" placeholder="Search symbol" class="dark-input">
+            <select id="status-filter" class="dark-input">
+              <option value="">All statuses</option>
+              <option>READY</option>
+              <option>SETUP</option>
+              <option>WATCH</option>
+              <option>REJECT</option>
+              <option>WAIT</option>
+              <option>UNRANKED</option>
+            </select>
+          </div>
+        </div>
+        <div class="table-wrap custom-scroll">
+          <table class="dark-table">
+            <thead>
+              <tr><th>Symbol</th><th>Company</th><th>Last Price</th><th>ML Probability</th><th>Quant Score</th><th>Status</th></tr>
+            </thead>
+            <tbody id="scanner-body"></tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button id="prev-page" class="dark-btn">Previous</button>
+          <span id="page-label" class="text-muted"></span>
+          <button id="next-page" class="dark-btn">Next</button>
+        </div>
+      </section>
+
+      <!-- Performance & Walk-forward Model -->
+      <section class="board widget-glass span-col-7">
+        <p class="eyebrow">VALIDATION</p>
+        <h2>Walk-forward model audit</h2>
+        <section class="metrics mini-metrics" id="model-metrics"></section>
+        <div id="model-verdict" class="model-verdict">Reading validation evidence…</div>
+        <div id="folds" class="folds-grid"></div>
+        <details class="metric-guide" open>
+          <summary>Cara membaca metrik ini</summary>
+          <div class="metric-guide-grid">
+            <article><b>AUC</b><p>Kemampuan model membedakan saham yang naik dan tidak. <strong>0,50 = acak</strong>; makin mendekati 1 makin baik. Nilai 0,5625 berarti ada sinyal kecil, belum kuat.</p></article>
+            <article><b>Profit Factor</b><p>Total laba kotor dibagi total rugi kotor. <strong>1,00 = impas</strong>; 1,163 berarti setiap Rp1 rugi menghasilkan sekitar Rp1,163 laba kotor sebelum biaya.</p></article>
+            <article><b>Accuracy</b><p>Persentase seluruh tebakan yang benar. Bisa menyesatkan bila jumlah kelas naik dan turun tidak seimbang, sehingga tidak boleh dibaca sendirian.</p></article>
+            <article><b>Precision</b><p>Dari semua prediksi “naik”, berapa yang benar-benar naik. Contoh precision 0,515 berarti sekitar 51,5% sinyal naik pada fold itu tepat.</p></article>
+            <article><b>Engine Quality</b><p>Skor gabungan konservatif: 35% AUC, 30% Profit Factor, 20% journal yang disusutkan karena sampel kecil, dan 15% drawdown. Ini <strong>bukan peluang pasti menang</strong>.</p></article>
+          </div>
+        </details>
+        <div id="equity-chart" class="chart"></div>
+      </section>
+
+      <!-- Prediction Journal -->
+      <section class="board widget-glass span-col-5">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">IMMUTABLE EVIDENCE</p>
+            <h2>Prediction Journal</h2>
+          </div>
+          <strong id="journal-pending-count" class="journal-count">— active</strong>
+        </div>
+        <div class="journal-group-heading"><div><span class="journal-state-dot active"></span><b>Active Predictions</b><small>Masih menunggu candle pembuktian</small></div></div>
+        <div class="table-wrap custom-scroll">
+          <table class="dark-table journal-table">
+            <thead>
+              <tr>
+                <th scope="col">Signal Date</th>
+                <th scope="col">Symbol</th>
+                <th scope="col">Decision</th>
+                <th scope="col">ML Probability</th>
+                <th scope="col">Reference</th>
+                <th scope="col">Current Price</th>
+                <th scope="col">Live Move</th>
+                <th scope="col">Next Close</th>
+                <th scope="col">Return</th>
+                <th scope="col">Proof</th>
+              </tr>
+            </thead>
+            <tbody id="journal-active-body"></tbody>
+          </table>
+        </div>
+        <div class="journal-group-heading history"><div><span class="journal-state-dot verified"></span><b>Verified History</b><small>Prediksi yang sudah memiliki hasil aktual</small></div><strong id="journal-accuracy">Pending evaluation</strong></div>
+        <div class="table-wrap custom-scroll journal-history-wrap">
+          <table class="dark-table journal-table">
+            <thead>
+              <tr>
+                <th scope="col">Signal Date</th><th scope="col">Symbol</th><th scope="col">Decision</th><th scope="col">ML Probability</th><th scope="col">Reference</th><th scope="col">Current Price</th><th scope="col">Live Move</th><th scope="col">Next Close</th><th scope="col">Return</th><th scope="col">Proof</th>
+              </tr>
+            </thead>
+            <tbody id="journal-history-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Tomorrow Plan & Risk Console -->
+      <section class="board widget-glass span-col-6">
+        <p class="eyebrow">NEXT SESSION</p>
+        <h2>Tomorrow Plan</h2>
+        <p class="feed-warning text-muted">Generated after market close. Revalidate after open.</p>
+        <div id="tomorrow-plans" class="plans custom-scroll"></div>
+      </section>
+
+      <section class="board widget-glass span-col-6">
+        <p class="eyebrow">CAPITAL PROTECTION</p>
+        <div class="risk-console-heading"><h2>Risk &amp; Signal Controls</h2><span>Applied on next scan</span></div>
+        <div class="risk-presets" role="group" aria-label="Risk profile">
+          <button type="button" data-risk-profile="conservative">Conservative</button>
+          <button type="button" data-risk-profile="balanced" class="active">Balanced</button>
+          <button type="button" data-risk-profile="exploratory">Exploratory</button>
+        </div>
+        <div class="risk-control-grid">
+          <label><span>Risk per trade</span><input id="risk-per-trade" type="number" min="0.1" max="2" step="0.1" value="1.0"><small>% of equity</small></label>
+          <label><span>Daily loss limit</span><input id="daily-loss-limit" type="number" min="0.5" max="5" step="0.5" value="2.0"><small>hard stop %</small></label>
+          <label><span>Minimum R/R</span><input id="minimum-rr" type="number" min="1" max="3" step="0.1" value="1.5"><small>reward ÷ risk</small></label>
+          <label><span>Quant score gate</span><input id="quant-score-gate" type="number" min="50" max="90" step="1" value="65"><small>minimum score</small></label>
+          <label><span>Profit Factor gate</span><input id="profit-factor-gate" type="number" min="1" max="2" step="0.05" value="1.0"><small>1.0 = gross break-even</small></label>
+        </div>
+        <div class="risk-summary">
+          <span>ML Gate</span><b id="min-ml-threshold">65%</b><small id="risk-profile-note">Balanced profile · custom values are saved locally</small>
+        </div>
+        <p class="risk-note text-muted">LLM tidak memiliki akses untuk mengubah entry, position size, stop loss, atau veto.</p>
+      </section>
+
+      <footer class="span-col-12 text-muted">
+        Decision support only — not financial advice. Paper-trade and validate out-of-sample before risking capital.
+      </footer>
+    </main>
+  </div>
+  
+  <!-- Verbose Terminal -->
+  <div id="scan-terminal" class="scan-terminal" style="display: none;">
+    <div class="terminal-header">
+      <span>System Logs</span>
+      <button id="close-terminal" class="terminal-close">&times;</button>
+    </div>
+    <div id="terminal-logs" class="terminal-logs custom-scroll"></div>
+  </div>
+
+  <script src="{% static 'app.js' %}?v=28"></script>
+</body>
+</html>
