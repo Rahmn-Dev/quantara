@@ -1,5 +1,8 @@
 # Quantara IDX
 
+<img width="1920" height="1280" alt="121_1x_shots_so" src="https://github.com/user-attachments/assets/a5678034-f7b5-48f8-9c07-a2d1ec36ff79" />
+
+
 Personal, deterministic-first IDX decision dashboard. The system deliberately separates:
 
 `market data → quant score → risk veto → trade plan → WebSocket UI → AI explanation`
