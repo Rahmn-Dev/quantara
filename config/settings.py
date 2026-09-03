@@ -114,3 +114,8 @@ NINEROUTER = {
     "api_key": env("NINEROUTER_API_KEY", default=""),
     "model": env("NINEROUTER_MODEL", default=""),
 }
+AUTO_PAPER_TRADING = {
+    "enabled": env.bool("AUTO_PAPER_TRADING_ENABLED", default=True),
+    "top_n": env.int("AUTO_PAPER_TOP_N", default=2),
+    "expiry_minutes": env.int("AUTO_PAPER_EXPIRY_MINUTES", default=15),
+}

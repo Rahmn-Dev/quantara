@@ -190,3 +190,32 @@ class DemoPosition(models.Model):
 
     class Meta:
         ordering = ["-opened_at"]
+
+
+class DemoOrder(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "PENDING"
+        FILLED = "FILLED"
+        REJECTED = "REJECTED"
+        EXPIRED = "EXPIRED"
+
+    account = models.ForeignKey(DemoAccount, on_delete=models.CASCADE, related_name="orders")
+    instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
+    trade_plan = models.ForeignKey(TradePlan, on_delete=models.SET_NULL, null=True)
+    position = models.ForeignKey(DemoPosition, on_delete=models.SET_NULL, null=True, blank=True)
+    side = models.CharField(max_length=4, default="BUY")
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+    requested_lots = models.PositiveIntegerField()
+    filled_lots = models.PositiveIntegerField(default=0)
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    filled_at = models.DateTimeField(null=True, blank=True)
+    reference_price = models.DecimalField(max_digits=16, decimal_places=4)
+    fill_price = models.DecimalField(max_digits=16, decimal_places=4, null=True, blank=True)
+    fee = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    slippage_percent = models.FloatField(default=0)
+    reason = models.CharField(max_length=180, blank=True)
+    metadata = models.JSONField(default=dict)
+
+    class Meta:
+        ordering = ["-submitted_at"]

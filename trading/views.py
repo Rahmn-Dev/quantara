@@ -20,6 +20,7 @@ from .models import (
     ScanRun,
     TradePlan,
     DemoAccount,
+    DemoOrder,
     DemoPosition,
 )
 from .scanner import scan_market
@@ -287,7 +288,13 @@ def scanner_list(request):
 @api_view(["GET"])
 def market_ticker(request):
     """Largest daily movers, overlaid with the latest best-effort intraday price."""
-    cached = cache.get("market-ticker-live")
+    now = timezone.localtime()
+    minute = now.hour * 60 + now.minute
+    first_end = 11 * 60 + 30 if now.weekday() == 4 else 12 * 60
+    second_start = 14 * 60 if now.weekday() == 4 else 13 * 60 + 30
+    market_active = now.weekday() < 5 and ((8 * 60 + 57 <= minute <= first_end) or (second_start - 3 <= minute <= 15 * 60 + 49))
+    cache_key = "market-ticker-live" if market_active else "market-ticker-final"
+    cached = cache.get(cache_key)
     if cached:
         return Response(cached)
     daily = Candle.objects.filter(instrument=OuterRef("pk"), interval="1d").order_by(
@@ -314,10 +321,12 @@ def market_ticker(request):
         )
     movers.sort(key=lambda item: abs(item["change_percent"]), reverse=True)
     movers = movers[:40]
-    try:
-        live = _fetch_live_prices([item["symbol"] for item in movers])
-    except Exception:  # noqa: BLE001 - cached daily tape remains usable
-        live = {}
+    live = {}
+    if market_active:
+        try:
+            live = _fetch_live_prices([item["symbol"] for item in movers])
+        except Exception:  # noqa: BLE001 - stored daily tape remains usable
+            live = {}
     for item in movers:
         quote = live.get(item["symbol"])
         if quote:
@@ -325,8 +334,8 @@ def market_ticker(request):
             item["updated_at"] = quote["market_time"]
             item["change_percent"] = round((quote["price"] / item["previous_close"] - 1) * 100, 2)
         item.pop("previous_close", None)
-    payload = {"source": "Yahoo intraday best-effort", "results": movers}
-    cache.set("market-ticker-live", payload, 10)
+    payload = {"source": "Yahoo intraday best-effort" if market_active else "stored final close", "market_active": market_active, "results": movers}
+    cache.set(cache_key, payload, 10 if market_active else 3600)
     return Response(payload)
 
 
@@ -374,10 +383,16 @@ def demo_account(request):
         positions.append({"id": position.id, "symbol": position.instrument.symbol, "shares": position.shares,
                           "lots": position.shares // 100, "entry_price": position.entry_price,
                           "current_price": price, "market_value": value, "unrealized_pnl": pnl})
+    orders = [{"id": order.id, "symbol": order.instrument.symbol, "side": order.side, "status": order.status,
+               "requested_lots": order.requested_lots, "filled_lots": order.filled_lots,
+               "reference_price": order.reference_price, "fill_price": order.fill_price,
+               "slippage_percent": order.slippage_percent, "fee": order.fee, "reason": order.reason,
+               "submitted_at": order.submitted_at}
+              for order in account.orders.select_related("instrument").all()[:25]]
     return Response({"name": account.name, "starting_cash": account.starting_cash, "cash": account.cash,
                      "market_value": market_value, "equity": account.cash + market_value,
                      "unrealized_pnl": unrealized, "realized_pnl": account.realized_pnl,
-                     "fee_assumption": {"buy": 0.0015, "sell": 0.0025}, "positions": positions})
+                     "fee_assumption": {"buy": 0.0015, "sell": 0.0025}, "positions": positions, "orders": orders})
 
 
 @api_view(["POST"])
@@ -424,6 +439,12 @@ def demo_buy(request, plan_id):
         return Response({"error": "Kas paper account tidak cukup."}, status=409)
     position = DemoPosition.objects.create(account=account, instrument=plan.instrument, trade_plan=plan,
                                            shares=shares, entry_price=price, entry_fee=fee)
+    DemoOrder.objects.create(
+        trade_plan=plan, side="BUY", account=account, instrument=plan.instrument, position=position,
+        status=DemoOrder.Status.FILLED, requested_lots=lots, filled_lots=lots,
+        reference_price=price, fill_price=price, fee=fee, filled_at=timezone.now(),
+        reason="manual paper order", metadata={"plan_status": plan.status},
+    )
     account.cash -= cost; account.save(update_fields=["cash", "updated_at"])
     return Response({"id": position.id, "symbol": plan.instrument.symbol, "lots": lots, "fill_price": price}, status=201)
 
@@ -555,6 +576,8 @@ def prediction_history(request):
                     "realized_price": row.realized_price,
                     "realized_return": row.realized_return,
                     "was_correct": row.was_correct,
+                    "evaluated_at": row.evaluated_at,
+                    "last_stored_price": (Candle.objects.filter(instrument=row.instrument, interval="1d").order_by("-timestamp").values_list("close", flat=True).first()),
                 }
                 for row in records
             ],
@@ -566,6 +589,8 @@ def prediction_history(request):
 def intraday(request, symbol):
     try:
         frame = YahooMarketData().fetch(symbol, period="5d", interval="5m").tail(300)
+        def scalar(value):
+            return value.iloc[0] if hasattr(value, "iloc") else value
         return Response(
             {
                 "symbol": symbol,
@@ -574,11 +599,11 @@ def intraday(request, symbol):
                 "candles": [
                     {
                         "time": index.to_pydatetime(),
-                        "open": float(row["Open"]),
-                        "high": float(row["High"]),
-                        "low": float(row["Low"]),
-                        "close": float(row["Close"]),
-                        "volume": int(row.get("Volume", 0)),
+                        "open": float(scalar(row["Open"])),
+                        "high": float(scalar(row["High"])),
+                        "low": float(scalar(row["Low"])),
+                        "close": float(scalar(row["Close"])),
+                        "volume": int(scalar(row.get("Volume", 0))),
                     }
                     for index, row in frame.iterrows()
                 ],

@@ -34,6 +34,8 @@ class YahooMarketData:
         )
         if frame.empty:
             raise ValueError(f"No market data returned for {ticker}")
+        if isinstance(frame.columns, pd.MultiIndex):
+            frame.columns = [column[0] if isinstance(column, tuple) else column for column in frame.columns]
         return frame.dropna(subset=["Open", "High", "Low", "Close"])
 
     def sync(self, instrument: Instrument, *, period="1y", interval="1d") -> SyncResult:
@@ -41,6 +43,7 @@ class YahooMarketData:
         rows = 0
         latest = None
         for index, row in frame.iterrows():
+            scalar = lambda value: value.iloc[0] if isinstance(value, pd.Series) else value
             stamp = index.to_pydatetime()
             if timezone.is_naive(stamp):
                 stamp = timezone.make_aware(stamp)
@@ -50,11 +53,11 @@ class YahooMarketData:
                 timestamp=stamp,
                 interval=interval,
                 defaults={
-                    "open": row["Open"],
-                    "high": row["High"],
-                    "low": row["Low"],
-                    "close": row["Close"],
-                    "volume": int(row.get("Volume", 0)),
+                    "open": scalar(row["Open"]),
+                    "high": scalar(row["High"]),
+                    "low": scalar(row["Low"]),
+                    "close": scalar(row["Close"]),
+                    "volume": int(scalar(row.get("Volume", 0))),
                     "source": self.source,
                 },
             )
