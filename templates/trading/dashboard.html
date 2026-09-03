@@ -12,7 +12,7 @@
   <link rel="stylesheet" href="{% static 'mini.css' %}">
   <link rel="stylesheet" href="{% static 'final.css' %}">
   <link rel="stylesheet" href="{% static 'dashboard.css' %}">
-  <link rel="stylesheet" href="{% static 'dashboard-v2.css' %}?v=30">
+  <link rel="stylesheet" href="{% static 'dashboard-v2.css' %}?v=42">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body class="dark-dashboard">
@@ -80,13 +80,14 @@
         <div class="section-title">
           <div>
             <p class="eyebrow">TODAY'S PLAYBOOK</p>
-            <h2>Top 7 ranked setups</h2>
+            <h2>Top 7 market candidates</h2>
           </div>
           <div class="controls-right">
             <label class="offline-toggle"><input id="offline" type="checkbox"> <span>Use cached data (offline)</span></label>
             <span class="truth">Quant decides · Risk vetoes · AI explains</span>
           </div>
         </div>
+        <div id="playbook-windows" class="window-tabs" aria-label="Decision window"></div>
         <div id="plans" class="plans custom-scroll">
           <div class="empty">No plan yet. Run the market scan.</div>
         </div>
@@ -105,6 +106,12 @@
             <button type="button" data-range="3mo">3M</button>
             <button type="button" data-range="1y" class="active">1Y</button>
             <button type="button" data-range="5y">5Y</button>
+          </div>
+          <div id="chart-zoom" class="chart-zoom" aria-label="Candle size">
+            <button type="button" data-zoom="out" title="Smaller candles">−</button>
+            <span>CANDLE</span>
+            <button type="button" data-zoom="in" title="Larger candles">＋</button>
+            <button type="button" data-zoom="fit">FIT</button>
           </div>
         </div>
         <div id="chart" class="chart">
@@ -129,8 +136,15 @@
         <div id="live-chart" class="chart"></div>
       </section>
 
+      <section class="board widget-glass span-col-8 paper-desk">
+        <div class="section-title"><div><p class="eyebrow">ZERO-MONEY EXECUTION</p><h2>Paper Trading Account</h2></div><div class="paper-account-tools"><span class="truth">Simulation · fees included · no broker connection</span><button type="button" id="edit-paper-capital" class="dark-btn">Edit Modal</button></div></div>
+        <div id="paper-capital-editor" class="paper-capital-editor" hidden><label><span>Modal awal (Rp)</span><input id="paper-capital-input" type="number" min="1000000" max="10000000000" step="1000000" class="dark-input"></label><button type="button" id="save-paper-capital" class="dark-btn primary">Simpan</button><button type="button" id="cancel-paper-capital" class="dark-btn">Batal</button><small id="paper-capital-message"></small></div>
+        <div id="paper-summary" class="paper-summary"><div class="empty">Loading paper account…</div></div>
+        <div id="paper-positions" class="paper-positions"></div>
+      </section>
+
       <!-- Market Scanner -->
-      <section class="board widget-glass span-col-8">
+      <section class="board widget-glass span-col-8 scanner-panel">
         <div class="section-title">
           <div>
             <p class="eyebrow">FULL IDX UNIVERSE</p>
@@ -164,6 +178,23 @@
         </div>
       </section>
 
+      <section class="board widget-glass span-col-4 risk-side-panel">
+        <p class="eyebrow">CAPITAL PROTECTION</p>
+        <div class="risk-console-heading"><h2>Risk &amp; Signal Controls</h2><span>Applied on next scan</span></div>
+        <div class="risk-presets" role="group" aria-label="Risk profile">
+          <button type="button" data-risk-profile="conservative">Conservative</button><button type="button" data-risk-profile="balanced" class="active">Balanced</button><button type="button" data-risk-profile="exploratory">Exploratory</button>
+        </div>
+        <div class="risk-control-grid">
+          <label><span>Risk per trade</span><input id="risk-per-trade" type="number" min="0.1" max="2" step="0.1" value="1.0"><small>% of equity</small></label>
+          <label><span>Daily loss limit</span><input id="daily-loss-limit" type="number" min="0.5" max="5" step="0.5" value="2.0"><small>hard stop %</small></label>
+          <label><span>Minimum R/R</span><input id="minimum-rr" type="number" min="1" max="3" step="0.1" value="1.5"><small>reward ÷ risk</small></label>
+          <label><span>Quant score gate</span><input id="quant-score-gate" type="number" min="50" max="90" step="1" value="65"><small>minimum score</small></label>
+          <label><span>Profit Factor gate</span><input id="profit-factor-gate" type="number" min="1" max="2" step="0.05" value="1.0"><small>1.0 = gross break-even</small></label>
+        </div>
+        <div class="risk-summary"><span>ML Gate</span><b id="min-ml-threshold">65%</b><small id="risk-profile-note">Balanced profile · custom values are saved locally</small></div>
+        <p class="risk-note text-muted">LLM tidak memiliki akses untuk mengubah entry, position size, stop loss, atau veto.</p>
+      </section>
+
       <!-- Performance & Walk-forward Model -->
       <section class="board widget-glass span-col-7">
         <p class="eyebrow">VALIDATION</p>
@@ -193,6 +224,7 @@
           </div>
           <strong id="journal-pending-count" class="journal-count">— active</strong>
         </div>
+        <div id="journal-windows" class="window-tabs" aria-label="Journal decision window"></div>
         <div class="journal-group-heading"><div><span class="journal-state-dot active"></span><b>Active Predictions</b><small>Masih menunggu candle pembuktian</small></div></div>
         <div class="table-wrap custom-scroll">
           <table class="dark-table journal-table">
@@ -226,35 +258,6 @@
         </div>
       </section>
 
-      <!-- Tomorrow Plan & Risk Console -->
-      <section class="board widget-glass span-col-6">
-        <p class="eyebrow">NEXT SESSION</p>
-        <h2>Tomorrow Plan</h2>
-        <p class="feed-warning text-muted">Generated after market close. Revalidate after open.</p>
-        <div id="tomorrow-plans" class="plans custom-scroll"></div>
-      </section>
-
-      <section class="board widget-glass span-col-6">
-        <p class="eyebrow">CAPITAL PROTECTION</p>
-        <div class="risk-console-heading"><h2>Risk &amp; Signal Controls</h2><span>Applied on next scan</span></div>
-        <div class="risk-presets" role="group" aria-label="Risk profile">
-          <button type="button" data-risk-profile="conservative">Conservative</button>
-          <button type="button" data-risk-profile="balanced" class="active">Balanced</button>
-          <button type="button" data-risk-profile="exploratory">Exploratory</button>
-        </div>
-        <div class="risk-control-grid">
-          <label><span>Risk per trade</span><input id="risk-per-trade" type="number" min="0.1" max="2" step="0.1" value="1.0"><small>% of equity</small></label>
-          <label><span>Daily loss limit</span><input id="daily-loss-limit" type="number" min="0.5" max="5" step="0.5" value="2.0"><small>hard stop %</small></label>
-          <label><span>Minimum R/R</span><input id="minimum-rr" type="number" min="1" max="3" step="0.1" value="1.5"><small>reward ÷ risk</small></label>
-          <label><span>Quant score gate</span><input id="quant-score-gate" type="number" min="50" max="90" step="1" value="65"><small>minimum score</small></label>
-          <label><span>Profit Factor gate</span><input id="profit-factor-gate" type="number" min="1" max="2" step="0.05" value="1.0"><small>1.0 = gross break-even</small></label>
-        </div>
-        <div class="risk-summary">
-          <span>ML Gate</span><b id="min-ml-threshold">65%</b><small id="risk-profile-note">Balanced profile · custom values are saved locally</small>
-        </div>
-        <p class="risk-note text-muted">LLM tidak memiliki akses untuk mengubah entry, position size, stop loss, atau veto.</p>
-      </section>
-
       <footer class="span-col-12 text-muted">
         Decision support only — not financial advice. Paper-trade and validate out-of-sample before risking capital.
       </footer>
@@ -270,6 +273,6 @@
     <div id="terminal-logs" class="terminal-logs custom-scroll"></div>
   </div>
 
-  <script src="{% static 'app.js' %}?v=28"></script>
+  <script src="{% static 'app.js' %}?v=42"></script>
 </body>
 </html>

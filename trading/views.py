@@ -4,6 +4,8 @@ from django.shortcuts import get_object_or_404, render
 from django.core.cache import cache
 from django.conf import settings
 from django.utils import timezone
+from django.db import transaction
+from decimal import Decimal
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
@@ -17,6 +19,8 @@ from .models import (
     PredictionRecord,
     ScanRun,
     TradePlan,
+    DemoAccount,
+    DemoPosition,
 )
 from .scanner import scan_market
 from .serializers import TradePlanSerializer
@@ -78,7 +82,12 @@ def market_session():
 @api_view(["GET"])
 def today(request):
     trading_date = timezone.localdate()
-    plans = list(TradePlan.objects.filter(trading_date=trading_date).select_related("instrument"))
+    base_plans = TradePlan.objects.filter(trading_date=trading_date)
+    available_windows = list(base_plans.order_by().values_list("decision_window", flat=True).distinct())
+    requested_window = request.GET.get("window", "").upper()
+    preferred = ["CLOSE_FINAL", "MIDDAY_1130", "OPEN_0930", "LEGACY"]
+    selected_window = requested_window if requested_window in available_windows else next((item for item in preferred if item in available_windows), "LEGACY")
+    plans = list(base_plans.filter(decision_window=selected_window).select_related("instrument"))
 
     regime = MarketRegime.objects.order_by("-observed_at").first()
     scan = ScanRun.objects.order_by("-started_at").first()
@@ -88,6 +97,8 @@ def today(request):
             "regime": regime.state if regime else "BULLISH",
             "risk_mode": "NORMAL",
             "session": market_session(),
+            "selected_window": selected_window,
+            "available_windows": available_windows,
             "data": {
                 "source": scan.source if scan else "demo",
                 "freshest_candle_at": scan.freshest_candle_at if scan else None,
@@ -346,6 +357,109 @@ def live_prices(request):
     return Response({"source": "Yahoo intraday best-effort", "delayed": True, "prices": prices})
 
 
+def _paper_price(instrument):
+    candle = Candle.objects.filter(instrument=instrument, interval="1d").order_by("-timestamp").first()
+    return candle.close if candle else None
+
+
+@api_view(["GET"])
+def demo_account(request):
+    account, _ = DemoAccount.objects.get_or_create(pk=1)
+    positions, market_value, unrealized = [], Decimal("0"), Decimal("0")
+    for position in account.positions.filter(status="OPEN").select_related("instrument", "trade_plan"):
+        price = _paper_price(position.instrument) or position.entry_price
+        value = price * position.shares
+        pnl = (price - position.entry_price) * position.shares - position.entry_fee
+        market_value += value; unrealized += pnl
+        positions.append({"id": position.id, "symbol": position.instrument.symbol, "shares": position.shares,
+                          "lots": position.shares // 100, "entry_price": position.entry_price,
+                          "current_price": price, "market_value": value, "unrealized_pnl": pnl})
+    return Response({"name": account.name, "starting_cash": account.starting_cash, "cash": account.cash,
+                     "market_value": market_value, "equity": account.cash + market_value,
+                     "unrealized_pnl": unrealized, "realized_pnl": account.realized_pnl,
+                     "fee_assumption": {"buy": 0.0015, "sell": 0.0025}, "positions": positions})
+
+
+@api_view(["POST"])
+@transaction.atomic
+def demo_account_config(request):
+    account, _ = DemoAccount.objects.select_for_update().get_or_create(pk=1)
+    try:
+        starting_cash = Decimal(str(request.data.get("starting_cash")))
+    except (TypeError, ValueError, ArithmeticError):
+        return Response({"error": "Modal awal tidak valid."}, status=400)
+    if starting_cash < Decimal("1000000") or starting_cash > Decimal("10000000000"):
+        return Response({"error": "Modal awal harus Rp1 juta–Rp10 miliar."}, status=400)
+    account.cash += starting_cash - account.starting_cash
+    if account.cash < 0:
+        return Response({"error": "Modal tidak dapat lebih kecil dari dana yang sudah dipakai."}, status=409)
+    account.starting_cash = starting_cash
+    account.save(update_fields=["starting_cash", "cash", "updated_at"])
+    return Response({"starting_cash": account.starting_cash, "cash": account.cash})
+
+
+@api_view(["POST"])
+@transaction.atomic
+def demo_buy(request, plan_id):
+    plan = get_object_or_404(TradePlan.objects.select_related("instrument"), pk=plan_id)
+    if plan.status not in {TradePlan.Status.READY, TradePlan.Status.SETUP, TradePlan.Status.WATCH}:
+        return Response({"error": "Status ini tidak layak untuk paper test."}, status=409)
+    max_lots = max(1, plan.position_size // 100)
+    try:
+        lots = int(request.data.get("lots", 1))
+    except (TypeError, ValueError):
+        return Response({"error": "Jumlah lot harus berupa angka bulat."}, status=400)
+    if lots < 1 or lots > max_lots:
+        return Response({"error": f"Jumlah lot harus 1–{max_lots} sesuai batas risiko."}, status=400)
+    shares = lots * 100
+    price = _paper_price(plan.instrument)
+    if price is None:
+        return Response({"error": "Harga pasar belum tersedia."}, status=409)
+    if not Decimal(str(plan.entry_low)) <= price <= Decimal(str(plan.entry_high)):
+        return Response({"error": "Harga saat ini berada di luar entry zone."}, status=409)
+    account, _ = DemoAccount.objects.select_for_update().get_or_create(pk=1)
+    fee = price * shares * Decimal("0.0015")
+    cost = price * shares + fee
+    if account.cash < cost:
+        return Response({"error": "Kas paper account tidak cukup."}, status=409)
+    position = DemoPosition.objects.create(account=account, instrument=plan.instrument, trade_plan=plan,
+                                           shares=shares, entry_price=price, entry_fee=fee)
+    account.cash -= cost; account.save(update_fields=["cash", "updated_at"])
+    return Response({"id": position.id, "symbol": plan.instrument.symbol, "lots": lots, "fill_price": price}, status=201)
+
+
+@api_view(["POST"])
+@transaction.atomic
+def demo_close(request, position_id):
+    position = get_object_or_404(DemoPosition.objects.select_for_update().select_related("account", "instrument"), pk=position_id, status="OPEN")
+    price = _paper_price(position.instrument)
+    if price is None:
+        return Response({"error": "Harga pasar belum tersedia."}, status=409)
+    try:
+        lots = int(request.data.get("lots", position.shares // 100))
+    except (TypeError, ValueError):
+        return Response({"error": "Jumlah lot tidak valid."}, status=400)
+    open_lots = position.shares // 100
+    if lots < 1 or lots > open_lots:
+        return Response({"error": f"Jumlah lot harus 1–{open_lots}."}, status=400)
+    closing_shares = lots * 100
+    allocated_entry_fee = position.entry_fee * Decimal(closing_shares) / Decimal(position.shares)
+    proceeds = price * closing_shares
+    exit_fee = proceeds * Decimal("0.0025")
+    pnl = proceeds - exit_fee - position.entry_price * closing_shares - allocated_entry_fee
+    if closing_shares == position.shares:
+        position.exit_price = price; position.exit_fee = exit_fee; position.realized_pnl = pnl
+        position.closed_at = timezone.now(); position.status = "CLOSED"
+    else:
+        position.shares -= closing_shares
+        position.entry_fee -= allocated_entry_fee
+    position.save()
+    account = position.account; account.cash += proceeds - exit_fee; account.realized_pnl += pnl
+    account.save(update_fields=["cash", "realized_pnl", "updated_at"])
+    return Response({"id": position.id, "closed_lots": lots, "remaining_lots": position.shares // 100 if position.status == "OPEN" else 0,
+                     "exit_price": price, "realized_pnl": pnl})
+
+
 @api_view(["GET"])
 def system_status(request):
     model = ModelRun.objects.order_by("-trained_at").first()
@@ -413,13 +527,21 @@ def prediction_history(request):
     from .evaluation import evaluate_predictions
 
     evaluate_predictions()
-    records = PredictionRecord.objects.select_related("instrument").order_by("-predicted_at")[:100]
+    requested_window = request.GET.get("window", "").upper()
+    base_records = PredictionRecord.objects.all()
+    available_windows = list(base_records.order_by().values_list("decision_window", flat=True).distinct())
+    records = base_records
+    if requested_window and requested_window != "ALL":
+        records = records.filter(decision_window=requested_window)
+    records = records.select_related("instrument").order_by("-predicted_at")[:100]
     evaluated = PredictionRecord.objects.filter(was_correct__isnull=False)
     accuracy = evaluated.filter(was_correct=True).count() / evaluated.count() if evaluated else None
     return Response(
         {
             "evaluated": evaluated.count(),
             "accuracy": accuracy,
+            "selected_window": requested_window or "ALL",
+            "available_windows": available_windows,
             "results": [
                 {
                     "symbol": row.instrument.symbol,
@@ -428,6 +550,7 @@ def prediction_history(request):
                     "probability": row.model_probability,
                     "quant_score": row.quant_score,
                     "decision": row.decision,
+                    "decision_window": row.decision_window,
                     "reference_price": row.reference_price,
                     "realized_price": row.realized_price,
                     "realized_return": row.realized_return,

@@ -38,14 +38,38 @@ def build_snapshot(instrument: Instrument) -> Snapshot:
     vwap20 = (typical.tail(20) * volume.tail(20)).sum() / max(volume.tail(20).sum(), 1)
     if not np.isfinite(vwap20) or vwap20 <= 0:
         raise ValueError(f"{instrument.symbol}: invalid VWAP from zero-volume history")
+    returns = close.pct_change()
+    delta = close.diff()
+    avg_gain = delta.clip(lower=0).rolling(14).mean().iloc[-1]
+    avg_loss = -delta.clip(upper=0).rolling(14).mean().iloc[-1]
+    rsi14 = 100 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss)
+    sma20 = close.rolling(20).mean().iloc[-1]
+    std20 = close.rolling(20).std().iloc[-1]
+    upper, lower = sma20 + 2 * std20, sma20 - 2 * std20
+    consecutive_green = 0
+    for value in (close > frame.open).iloc[::-1]:
+        if not value:
+            break
+        consecutive_green += 1
+    rvol = float(volume.iloc[-1] / max(volume.tail(21).iloc[:-1].median(), 1))
     return Snapshot(
         symbol=instrument.symbol,
         close=float(close.iloc[-1]),
         momentum_20d=float(close.iloc[-1] / close.iloc[-21] - 1),
-        relative_volume=float(volume.iloc[-1] / max(volume.tail(21).iloc[:-1].median(), 1)),
+        relative_volume=rvol,
         distance_to_vwap=float(close.iloc[-1] / vwap20 - 1),
         atr_percent=float(atr_pct),
         liquidity_score=float(liquidity),
         broker_flow_score=50,
         gap_percent=float(frame.open.iloc[-1] / close.iloc[-2] - 1),
+        momentum_5d=float(close.iloc[-1] / close.iloc[-6] - 1),
+        momentum_60d=float(close.iloc[-1] / close.iloc[-61] - 1) if len(close) >= 61 else 0.0,
+        momentum_120d=float(close.iloc[-1] / close.iloc[-121] - 1) if len(close) >= 121 else 0.0,
+        volatility_20d=float(returns.rolling(20).std().iloc[-1]),
+        distance_to_sma20=float(close.iloc[-1] / sma20 - 1),
+        rsi_14=float(rsi14),
+        bollinger_position=float((close.iloc[-1] - lower) / max(upper - lower, 1e-9)),
+        consecutive_green_days=consecutive_green,
+        volume_climax=rvol,
+        median_turnover_20d=float(turnover.tail(20).median()),
     )

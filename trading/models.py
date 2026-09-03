@@ -49,6 +49,7 @@ class ScanRun(models.Model):
     instruments_scanned = models.PositiveIntegerField(default=0)
     freshest_candle_at = models.DateTimeField(null=True, blank=True)
     errors = models.JSONField(default=list)
+    decision_window = models.CharField(max_length=16, default="LEGACY")
 
 
 class ModelRun(models.Model):
@@ -90,13 +91,14 @@ class PredictionRecord(models.Model):
     was_correct = models.BooleanField(null=True, blank=True)
     evaluated_at = models.DateTimeField(null=True, blank=True)
     evidence = models.JSONField(default=dict)
+    decision_window = models.CharField(max_length=16, default="LEGACY", db_index=True)
 
     class Meta:
         ordering = ["-predicted_at"]
         constraints = [
             models.UniqueConstraint(
-                fields=["instrument", "signal_date", "model_name", "horizon_days"],
-                name="unique_prediction_record",
+                fields=["instrument", "signal_date", "model_name", "horizon_days", "decision_window"],
+                name="unique_prediction_window",
             )
         ]
 
@@ -142,13 +144,12 @@ class TradePlan(models.Model):
     veto_reasons = models.JSONField(default=list)
     commentary = models.TextField(blank=True)
     updated_at = models.DateTimeField(auto_now=True)
+    decision_window = models.CharField(max_length=16, default="LEGACY", db_index=True)
 
     class Meta:
         ordering = ["-trading_date", "-score"]
         constraints = [
-            models.UniqueConstraint(
-                fields=["instrument", "trading_date", "strategy"], name="unique_daily_strategy"
-            )
+            models.UniqueConstraint(fields=["instrument", "trading_date", "strategy", "decision_window"], name="unique_daily_strategy_window")
         ]
 
 
@@ -162,3 +163,30 @@ class PerformanceSnapshot(models.Model):
     max_drawdown = models.FloatField(default=0)
     equity_curve = models.JSONField(default=list)
     parameters = models.JSONField(default=dict)
+
+
+class DemoAccount(models.Model):
+    name = models.CharField(max_length=80, default="Paper Trading")
+    starting_cash = models.DecimalField(max_digits=18, decimal_places=2, default=100_000_000)
+    cash = models.DecimalField(max_digits=18, decimal_places=2, default=100_000_000)
+    realized_pnl = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class DemoPosition(models.Model):
+    account = models.ForeignKey(DemoAccount, on_delete=models.CASCADE, related_name="positions")
+    instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
+    trade_plan = models.ForeignKey(TradePlan, on_delete=models.SET_NULL, null=True)
+    opened_at = models.DateTimeField(auto_now_add=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    shares = models.PositiveIntegerField()
+    entry_price = models.DecimalField(max_digits=16, decimal_places=4)
+    exit_price = models.DecimalField(max_digits=16, decimal_places=4, null=True, blank=True)
+    entry_fee = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    exit_fee = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    realized_pnl = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    status = models.CharField(max_length=8, default="OPEN")
+
+    class Meta:
+        ordering = ["-opened_at"]

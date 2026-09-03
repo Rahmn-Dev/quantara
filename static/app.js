@@ -3,6 +3,9 @@ const escapeHtml = (value) => String(value).replace(/[&<>'"]/g, (char) => ({ "&"
 let latestPlanSymbols = [];
 let latestJournalRows = [];
 let currentPlansBySymbol = {};
+let selectedPlanWindow = "";
+let selectedJournalWindow = "CLOSE_FINAL";
+const windowLabels = {OPEN_0930:"OPEN 09:30",MIDDAY_1130:"MIDDAY 11:30",CLOSE_FINAL:"CLOSE FINAL",LEGACY:"LEGACY"};
 const formatDate = (d) => new Date(d).toLocaleDateString("id-ID", { day: 'numeric', month: 'long', year: 'numeric' });
 const formatDateTime = (d) => new Date(d).toLocaleString("id-ID", { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 const signedPct = (value) => `${Number(value) >= 0 ? "+" : ""}${(Number(value || 0) * 100).toFixed(2)}%`;
@@ -14,22 +17,28 @@ function technicalEvidence(plan) {
     ["Relative volume", `${Number(i.relative_volume || 0).toFixed(2)}×`, Number(i.relative_volume) >= 1.2, "Volume terakhir ÷ median volume 20 hari"],
     ["Jarak dari VWAP 20D", signedPct(i.distance_to_vwap), Number(i.distance_to_vwap) >= 0, "Harga terhadap harga rata-rata tertimbang volume"],
     ["ATR 14D", `${(Number(i.atr_percent || 0) * 100).toFixed(2)}%`, Number(i.atr_percent) <= .06, "Ukuran volatilitas untuk menentukan stop"],
-    ["Likuiditas", `${Number(i.liquidity_score || 0).toFixed(1)}/100`, Number(i.liquidity_score) >= 55, "Skor dari median nilai transaksi 20 hari"],
+    ["Liquidity percentile", `${Number(i.liquidity_score || 0).toFixed(1)}/100`, Number(i.liquidity_score) >= 55, `Relatif seluruh IDX · median Rp${money(i.median_turnover_20d || 0)}/hari`],
     ["Gap", signedPct(i.gap_percent), Math.abs(Number(i.gap_percent)) < .02, "Selisih open terakhir terhadap close sebelumnya"],
+    ["RSI 14", Number(i.rsi_14 || 0).toFixed(1), Number(i.rsi_14) <= 78, "Di atas 70 mulai panas; >78 diveto"],
+    ["Jarak SMA20", signedPct(i.distance_to_sma20), Number(i.distance_to_sma20) <= .15, "Terlalu jauh meningkatkan risiko koreksi"],
+    ["Green streak", `${Number(i.consecutive_green_days || 0)} hari`, Number(i.consecutive_green_days) <= 6, "Mencegah mengejar kenaikan beruntun"],
   ];
   const checks = Object.entries(plan.checks || {}).map(([name, pass]) => `<span class="evidence-check ${pass ? "pass" : "fail"}">${pass ? "✓" : "×"} ${escapeHtml(name.replaceAll("_", " "))}</span>`).join("");
   return `<div class="evidence-heading"><div><strong>Technical evidence at scan</strong><small>Snapshot tersimpan · bukan perubahan retroaktif</small></div><b>${Number(plan.ranking_score || 0).toFixed(2)} RANK</b></div>
     <div class="evidence-grid">${rows.map(([label,value,pass,help]) => `<div class="evidence-item ${pass ? "positive" : "negative"}"><span>${label}</span><b>${value}</b><small>${help}</small></div>`).join("")}</div>
-    <div class="evidence-formula"><b>Mengapa masuk Top 7?</b><span>Ranking = Quant ${Number(plan.score).toFixed(1)} × 45% + ML ${(Number(plan.confidence) * 100).toFixed(1)}% × 55% = <strong>${Number(plan.ranking_score || 0).toFixed(2)}</strong></span></div>
+    <div class="evidence-formula"><b>Mengapa masuk kandidat?</b><span>Ranking = Quant ${Number(plan.score).toFixed(1)} × 45% + ML ${(Number(plan.confidence) * 100).toFixed(1)}% × 55% = <strong>${Number(plan.ranking_score || 0).toFixed(2)}</strong>. Status ${plan.status} menentukan apakah actionable.</span></div>
     <div class="evidence-checks">${checks}</div>
     <div class="evidence-settings"><b>Setting scan:</b> Quant ≥ ${s.min_signal_score ?? "—"} · ML ≥ ${s.min_ml_probability != null ? Math.round(s.min_ml_probability * 100) + "%" : "—"} · R/R ≥ ${s.min_risk_reward ?? "—"} · Risk ${s.max_risk_per_trade != null ? (s.max_risk_per_trade * 100).toFixed(1) + "%" : "—"}</div>
-    <p class="evidence-warning">Broker flow masih bernilai netral 50/100 karena feed broker summary belum terhubung; tidak diklaim sebagai data broker aktual.</p>`;
+    <p class="evidence-warning">Broker flow belum terhubung dan bobotnya 0%. Sistem tidak lagi memberi poin dari placeholder.</p>`;
 }
 
 async function load() {
   try {
-    const response = await fetch("/api/today/");
+    const response = await fetch(`/api/today/${selectedPlanWindow ? `?window=${selectedPlanWindow}` : ""}`);
     const data = await response.json();
+    selectedPlanWindow = data.selected_window;
+    document.querySelector("#playbook-windows").innerHTML = ["OPEN_0930","MIDDAY_1130","CLOSE_FINAL"].map(value => `<button type="button" data-plan-window="${value}" class="${value === selectedPlanWindow ? "active" : ""}" ${data.available_windows.includes(value) ? "" : "disabled"}>${windowLabels[value]}</button>`).join("");
+    document.querySelectorAll("[data-plan-window]").forEach(button => button.onclick = () => { selectedPlanWindow=button.dataset.planWindow; load(); });
     currentPlansBySymbol = Object.fromEntries(data.plans.map((plan) => [plan.symbol, plan]));
     document.querySelector("#regime").textContent = data.regime;
     const regimeCard = document.querySelector("#regime-card");
@@ -48,11 +57,14 @@ async function load() {
           <div class="live-price-box"><span><i></i> LIVE PRICE</span><strong data-current-price>Updating…</strong><small data-current-move>Vs Prev · —</small></div>
           <div class="levels"><span><small>ENTRY</small><b>${money(plan.entry_low)}–${money(plan.entry_high)}</b></span><span><small>STOP</small><b>${money(plan.stop_loss)}</b></span><span><small>TARGET</small><b>${money(plan.take_profit)}</b></span><span><small>R/R</small><b>${plan.risk_reward}</b></span></div>
           <div class="score"><strong>${Math.round(plan.confidence * 100)}%</strong><small> ML PROBABILITY</small><div class="checks">${Object.values(plan.checks).map((passed) => `<i class="${passed ? "ok" : ""}"></i>`).join("")}</div></div><div class="mini-chart" id="mini-${plan.symbol}"></div>
-          <div class="insight-actions"><button type="button" class="technical-toggle" aria-expanded="false">⌁ Technical Evidence</button><button type="button" class="ai-insight-toggle" data-plan-id="${plan.id}" aria-expanded="false">✦ AI Insight</button><small>${plan.commentary ? "Saved analysis" : "Call 9Router on demand"}</small></div>
+          <div class="insight-actions"><button type="button" class="technical-toggle" aria-expanded="false">⌁ Technical Evidence</button><button type="button" class="ai-insight-toggle" data-plan-id="${plan.id}" aria-expanded="false">✦ AI Insight</button><div class="paper-order-control"><button type="button" data-lot-step="-1">−</button><label><input type="number" class="paper-lots" min="1" max="${Math.max(1, Math.floor(plan.position_size / 100))}" value="1"><span>LOT</span></label><button type="button" data-lot-step="1">＋</button><button type="button" class="paper-buy ${plan.status === "READY" ? "" : "experimental"}" data-plan-id="${plan.id}">${plan.status === "READY" ? "Paper Buy" : "Paper Test"}</button><small class="paper-estimate">≈ ${money(Number(plan.entry_high) * 100)}</small></div><small>${plan.commentary ? "Saved analysis" : "Call 9Router on demand"}</small></div>
           <div class="technical-evidence" hidden>${technicalEvidence(plan)}</div>
           <div class="plan-commentary" hidden><div class="insight-heading"><strong>AI Insight</strong><span>AI explains · Quant & risk stay authoritative</span></div><div class="insight-content">${plan.commentary ? marked.parse(plan.commentary) : ""}</div></div>
         </article>`).join("")
       : '<div class="empty">No plan yet. Run the market scan.</div>';
+    if (data.plans.length && !data.plans.some((plan) => plan.status === "READY")) {
+      document.querySelector("#plans").insertAdjacentHTML("afterbegin", '<div class="no-trade-banner"><b>NO TRADE</b><span>Tidak ada kandidat yang melewati seluruh ML, backtest, intraday, dan risk gate. Daftar di bawah hanya watchlist.</span></div>');
+    }
     document.querySelectorAll(".plan").forEach((card, index) => {
       card.onclick = () => loadChart(data.plans[index].symbol);
     });
@@ -60,12 +72,62 @@ async function load() {
     data.plans.forEach((plan) => loadMiniChart(plan.symbol));
     latestPlanSymbols = data.plans.map((plan) => plan.symbol);
     refreshDashboardPrices();
-    document.querySelector("#tomorrow-plans").innerHTML = document.querySelector("#plans").innerHTML;
     bindInsightButtons();
     bindTechnicalButtons();
+    bindPaperButtons();
+    loadDemoAccount();
   } catch (_error) {
     document.querySelector("#live").textContent = "OFFLINE";
   }
+}
+
+function bindPaperButtons() {
+  document.querySelectorAll(".paper-order-control").forEach((control) => {
+    const input = control.querySelector(".paper-lots"), estimate = control.querySelector(".paper-estimate"), card = control.closest(".plan");
+    const update = () => {
+      input.value = Math.max(Number(input.min), Math.min(Number(input.max), Number(input.value) || 1));
+      const plan = currentPlansBySymbol[card.dataset.planSymbol];
+      estimate.textContent = `≈ ${money(Number(plan?.entry_high || 0) * 100 * Number(input.value))}`;
+    };
+    control.querySelectorAll("[data-lot-step]").forEach(step => step.onclick = (event) => { event.preventDefault(); event.stopPropagation(); input.value = Number(input.value) + Number(step.dataset.lotStep); update(); });
+    input.onclick = (event) => event.stopPropagation(); input.onchange = update; input.oninput = update;
+  });
+  document.querySelectorAll(".paper-buy").forEach((button) => {
+    button.onclick = async (event) => {
+      event.preventDefault(); event.stopPropagation(); button.disabled = true;
+      try {
+        const lots = Number(button.closest(".paper-order-control").querySelector(".paper-lots").value);
+        const response = await fetch(`/api/demo-buy/${button.dataset.planId}/`, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({lots})});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Paper order rejected");
+        await loadDemoAccount(); button.textContent = `✓ Filled ${data.lots} Lot`;
+      } catch (error) { button.textContent = error.message; button.classList.add("paper-error"); }
+      finally { button.disabled = false; }
+    };
+  });
+}
+
+async function loadDemoAccount() {
+  const response = await fetch("/api/demo-account/"); const data = await response.json();
+  const pnlClass = (n) => Number(n) > 0 ? "price-up" : Number(n) < 0 ? "price-down" : "price-flat";
+  document.querySelector("#paper-summary").innerHTML = [["EQUITY",data.equity],["CASH",data.cash],["MARKET VALUE",data.market_value],["UNREALIZED P&L",data.unrealized_pnl],["REALIZED P&L",data.realized_pnl]].map(([label,value]) => `<article><small>${label}</small><strong class="${label.includes("P&L") ? pnlClass(value) : ""}">${money(value)}</strong></article>`).join("");
+  document.querySelector("#paper-positions").innerHTML = data.positions.length ? `<div class="paper-table-wrap"><table class="paper-position-table"><thead><tr><th>Saham</th><th>Lot</th><th>Avg Entry</th><th>Harga Sekarang</th><th>Modal Beli</th><th>Nilai Pasar</th><th>Unrealized P&amp;L</th><th>Return</th><th>Aksi</th></tr></thead><tbody>${data.positions.map(p => { const invested=Number(p.entry_price)*Number(p.shares); const returnPct=invested ? Number(p.unrealized_pnl)/invested*100 : 0; return `<tr data-paper-symbol="${escapeHtml(p.symbol)}" title="Klik untuk buka di Live Trading Desk"><td data-label="Saham"><b>${escapeHtml(p.symbol)}</b></td><td data-label="Lot">${p.lots}</td><td data-label="Avg Entry">${money(p.entry_price)}</td><td data-label="Harga Sekarang"><strong>${money(p.current_price)}</strong></td><td data-label="Modal Beli">${money(invested)}</td><td data-label="Nilai Pasar">${money(p.market_value)}</td><td data-label="Unrealized P&L"><strong class="${pnlClass(p.unrealized_pnl)}">${money(p.unrealized_pnl)}</strong></td><td data-label="Return"><strong class="${pnlClass(returnPct)}">${returnPct>=0?"+":""}${returnPct.toFixed(2)}%</strong></td><td data-label="Aksi"><div class="paper-close-control"><label><span>Lot ditutup</span><input type="number" min="1" max="${p.lots}" value="${p.lots}" aria-label="Jumlah lot yang ditutup"></label><small>dari ${p.lots}</small><button type="button" data-close-position="${p.id}">Tutup ${p.lots} Lot</button></div></td></tr>`; }).join("")}</tbody></table></div>` : '<div class="empty">Belum ada posisi. Paper Buy hanya tersedia ketika status READY dan harga berada di entry zone.</div>';
+  document.querySelectorAll("[data-paper-symbol]").forEach(row => row.onclick = (event) => { if (event.target.closest(".paper-close-control")) return; document.querySelector("#live-symbol").value=row.dataset.paperSymbol; loadLive(); });
+  document.querySelectorAll(".paper-close-control input").forEach(input => input.oninput = () => { const safe=Math.max(1,Math.min(Number(input.max),Number(input.value)||1)); input.value=safe; input.closest(".paper-close-control").querySelector("button").textContent=`Tutup ${safe} Lot`; });
+  document.querySelectorAll("[data-close-position]").forEach(button => button.onclick = async () => { button.disabled=true; const input=button.closest(".paper-close-control").querySelector("input"); const response=await fetch(`/api/demo-close/${button.dataset.closePosition}/`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({lots:Number(input.value)})}); const result=await response.json(); if(response.ok) loadDemoAccount(); else {button.textContent=result.error || "Rejected"; button.disabled=false;} });
+  const editCapital = document.querySelector("#edit-paper-capital");
+  const capitalEditor = document.querySelector("#paper-capital-editor"), capitalInput = document.querySelector("#paper-capital-input"), capitalMessage = document.querySelector("#paper-capital-message");
+  editCapital.onclick = () => { capitalInput.value = Math.round(Number(data.starting_cash)); capitalMessage.textContent = ""; capitalEditor.hidden = false; capitalInput.focus(); };
+  document.querySelector("#cancel-paper-capital").onclick = () => { capitalEditor.hidden = true; capitalMessage.textContent = ""; };
+  document.querySelector("#save-paper-capital").onclick = async (event) => {
+    const saveButton = event.currentTarget, value = Number(capitalInput.value);
+    saveButton.disabled = true; saveButton.textContent = "Menyimpan…";
+    const response = await fetch("/api/demo-account/config/", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({starting_cash:value})});
+    const result = await response.json();
+    if (response.ok) { capitalEditor.hidden = true; await loadDemoAccount(); }
+    else capitalMessage.textContent = result.error || "Modal gagal diperbarui.";
+    saveButton.disabled = false; saveButton.textContent = "Simpan";
+  };
 }
 
 function bindTechnicalButtons() {
@@ -128,6 +190,8 @@ async function loadMiniChart(symbol) {
 
 let currentChartSymbol = "";
 let currentChartRange = "1y";
+let currentChartZoom = 1;
+let chartFitMode = true;
 const chartRangeLabels = { "5d": "5 days", "1mo": "1 month", "3mo": "3 months", "1y": "1 year", "5y": "5 years" };
 
 async function loadChart(symbol, range = currentChartRange) {
@@ -170,7 +234,29 @@ async function loadChart(symbol, range = currentChartRange) {
       <text class="level-label entry-label" x="994" y="${y(plan.entry_high)-4}" text-anchor="end">ENTRY ZONE</text>
     </g>` : "";
   const planLegend = plan ? `<div class="chart-plan-legend"><span class="entry">Entry ${money(plan.entry_low)}–${money(plan.entry_high)}</span><span class="target">Target ${money(plan.take_profit)}</span><span class="stop">Stop ${money(plan.stop_loss)}</span><b class="badge ${plan.status}">${plan.status}</b><small>Level model · bukan jaminan hasil</small></div>` : "";
-  document.querySelector("#chart").innerHTML = `<svg viewBox="0 0 1000 250" preserveAspectRatio="none" role="img" aria-label="Candlestick chart with volume and technical overlays"><line class="grid" x1="0" y1="18" x2="1000" y2="18"/><line class="grid" x1="0" y1="101" x2="1000" y2="101"/><line class="grid" x1="0" y1="184" x2="1000" y2="184"/><line class="volume-divider" x1="0" y1="194" x2="1000" y2="194"/>${volumes}${overlays}${candleSvg}<polyline class="sma sma20" points="${linePoints(sma20)}"/><polyline class="sma sma50" points="${linePoints(sma50)}"/></svg>${planLegend}<div class="chart-meta"><b>Last ${money(last.close)}</b><span>H ${money(last.high)}</span><span>L ${money(last.low)}</span><span>Vol ${money(last.volume)}</span><span class="legend-sma20">— SMA20</span><span class="legend-sma50">— SMA50</span></div>`;
+  const chartViewport = Math.max(320, chartNode.clientWidth - 24);
+  const naturalPlotWidth = Math.max(chartViewport, candles.length * 10);
+  const plotWidth = chartFitMode ? chartViewport : Math.max(chartViewport, naturalPlotWidth * currentChartZoom);
+  document.querySelector("#chart").innerHTML = `<div class="chart-scroll"><svg viewBox="0 0 1000 250" preserveAspectRatio="none" style="width:${plotWidth}px" role="img" aria-label="Candlestick chart with volume and technical overlays"><line class="grid" x1="0" y1="18" x2="1000" y2="18"/><line class="grid" x1="0" y1="101" x2="1000" y2="101"/><line class="grid" x1="0" y1="184" x2="1000" y2="184"/><line class="volume-divider" x1="0" y1="194" x2="1000" y2="194"/>${volumes}${overlays}${candleSvg}<polyline class="sma sma20" points="${linePoints(sma20)}"/><polyline class="sma sma50" points="${linePoints(sma50)}"/><line class="chart-crosshair" x1="0" y1="0" x2="0" y2="238" hidden/></svg></div><div class="chart-tooltip" hidden></div>${planLegend}<div class="chart-meta"><b>Last ${money(last.close)}</b><span>H ${money(last.high)}</span><span>L ${money(last.low)}</span><span>Vol ${money(last.volume)}</span><span class="legend-sma20">— SMA20</span><span class="legend-sma50">— SMA50</span><span>↔ drag/scroll chart · hover for OHLC</span></div>`;
+  const scrollNode = chartNode.querySelector(".chart-scroll"), svg = scrollNode.querySelector("svg"), tooltip = chartNode.querySelector(".chart-tooltip"), crosshair = svg.querySelector(".chart-crosshair");
+  const inspectCandle = (event) => {
+    const svgRect = svg.getBoundingClientRect(), chartRect = chartNode.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(.9999, (event.clientX - svgRect.left) / svgRect.width));
+    const index = Math.min(candles.length - 1, Math.floor(ratio * candles.length)), candle = candles[index];
+    const crossX = ((index + .5) / candles.length) * 1000;
+    crosshair.hidden = false; crosshair.setAttribute("x1", crossX); crosshair.setAttribute("x2", crossX);
+    tooltip.hidden = false; tooltip.style.left = `${Math.min(chartRect.width - 175, Math.max(8, event.clientX - chartRect.left + 12))}px`; tooltip.style.top = "14px";
+    tooltip.innerHTML = `<b>${formatDateTime(candle.time)}</b><span>O ${money(candle.open)} · H ${money(candle.high)}</span><span>L ${money(candle.low)} · C ${money(candle.close)}</span><span>Volume ${money(candle.volume)}</span>`;
+  };
+  scrollNode.addEventListener("mousemove", inspectCandle);
+  scrollNode.addEventListener("mouseleave", () => { tooltip.hidden = true; crosshair.hidden = true; dragging = false; scrollNode.classList.remove("dragging"); });
+  scrollNode.addEventListener("wheel", (event) => { if (Math.abs(event.deltaY) > Math.abs(event.deltaX)) { event.preventDefault(); scrollNode.scrollLeft += event.deltaY; } }, {passive:false});
+  let dragging = false, dragStart = 0, scrollStart = 0;
+  scrollNode.addEventListener("mousedown", (event) => { dragging = true; dragStart = event.clientX; scrollStart = scrollNode.scrollLeft; scrollNode.classList.add("dragging"); });
+  scrollNode.addEventListener("mousemove", (event) => { if (dragging) scrollNode.scrollLeft = scrollStart - (event.clientX - dragStart); });
+  scrollNode.addEventListener("mouseup", () => { dragging = false; scrollNode.classList.remove("dragging"); });
+  // The decision-relevant view opens on the latest candles; history remains to the left.
+  requestAnimationFrame(() => { scrollNode.scrollLeft = scrollNode.scrollWidth - scrollNode.clientWidth; });
 }
 
 document.querySelector("#scan").onclick = async (event) => {
@@ -295,9 +381,31 @@ function renderLine(selector, values, color = "#1f8a5b") {
   node.innerHTML = `<svg viewBox="0 0 1000 250" preserveAspectRatio="none"><polyline style="fill:none;stroke:${color};stroke-width:3;vector-effect:non-scaling-stroke" points="${points}"/></svg>`;
 }
 
+function renderInteractiveLive(candles) {
+  const node = document.querySelector("#live-chart"), values = candles.map(candle => Number(candle.close));
+  if (!values.length) { node.innerHTML = '<div class="empty">No intraday observations yet.</div>'; return; }
+  const low = Math.min(...candles.map(c => Number(c.low))), high = Math.max(...candles.map(c => Number(c.high))), span = high - low || 1;
+  const xAt = index => candles.length === 1 ? 500 : (index / (candles.length - 1)) * 1000;
+  const yAt = value => 230 - ((Number(value) - low) / span) * 200;
+  const points = values.map((value, index) => `${xAt(index)},${yAt(value)}`).join(" ");
+  node.innerHTML = `<svg viewBox="0 0 1000 250" preserveAspectRatio="none" aria-label="Interactive intraday price chart"><polyline class="live-price-line" points="${points}"/><line class="live-crosshair-x" x1="0" x2="0" y1="20" y2="235" hidden/><line class="live-crosshair-y" x1="0" x2="1000" y1="0" y2="0" hidden/><circle class="live-hover-point" cx="0" cy="0" r="6" hidden/></svg><div class="live-chart-tooltip" hidden></div>`;
+  const vertical=node.querySelector(".live-crosshair-x"), horizontal=node.querySelector(".live-crosshair-y"), marker=node.querySelector(".live-hover-point"), tooltip=node.querySelector(".live-chart-tooltip");
+  const show = event => {
+    const rect=node.getBoundingClientRect(), clientX=event.touches?.[0]?.clientX ?? event.clientX, localX=Math.max(0,Math.min(rect.width,clientX-rect.left));
+    const index=Math.max(0,Math.min(candles.length-1,Math.round((localX/rect.width)*(candles.length-1)))), candle=candles[index], x=xAt(index), y=yAt(candle.close);
+    vertical.setAttribute("x1",x); vertical.setAttribute("x2",x); horizontal.setAttribute("y1",y); horizontal.setAttribute("y2",y); marker.setAttribute("cx",x); marker.setAttribute("cy",y);
+    [vertical,horizontal,marker,tooltip].forEach(element => element.hidden=false);
+    tooltip.innerHTML=`<b>${formatDateTime(candle.time)}</b><span>Close <strong>${money(candle.close)}</strong></span><span>High ${money(candle.high)} · Low ${money(candle.low)}</span><span>Volume ${money(candle.volume)}</span>`;
+    tooltip.style.left=`${Math.min(rect.width-175,Math.max(8,localX+12))}px`; tooltip.style.top=`${Math.max(8,(y/250)*rect.height-55)}px`;
+  };
+  node.onmousemove=show; node.ontouchmove=show; node.onmouseleave=()=>[vertical,horizontal,marker,tooltip].forEach(element => element.hidden=true);
+}
+
 async function loadJournal() {
-  const response = await fetch("/api/predictions/");
+  const response = await fetch(`/api/predictions/?window=${selectedJournalWindow}`);
   const data = await response.json();
+  document.querySelector("#journal-windows").innerHTML = ["ALL","OPEN_0930","MIDDAY_1130","CLOSE_FINAL","LEGACY"].filter(value => value === "ALL" || data.available_windows.includes(value)).map(value => `<button type="button" data-journal-window="${value}" class="${value === selectedJournalWindow ? "active" : ""}">${value === "ALL" ? "ALL" : windowLabels[value]}</button>`).join("");
+  document.querySelectorAll("[data-journal-window]").forEach(button => button.onclick=()=>{selectedJournalWindow=button.dataset.journalWindow;loadJournal();});
   const verifiedPercent = data.accuracy == null ? null : Math.round(data.accuracy * 100);
   const activeRows = data.results.filter((row) => row.was_correct == null);
   const historyRows = data.results.filter((row) => row.was_correct != null);
@@ -374,8 +482,7 @@ async function loadLive() {
     return;
   }
   if (!response.ok || !data.candles.length) { document.querySelector("#live-chart").innerHTML = `<div class="empty">${data.error || "No intraday data"}</div>`; return; }
-  const closes = data.candles.map((c) => c.close);
-  renderLine("#live-chart", closes);
+  renderInteractiveLive(data.candles);
   const last = data.candles[data.candles.length - 1];
   document.querySelector("#live-decision").innerHTML = `<div class="live-strip"><strong>${symbol} · ${money(last.close)}</strong><span>High ${money(last.high)}</span><span>Low ${money(last.low)}</span><span>Volume ${money(last.volume)}</span><span>Candle ${formatDateTime(last.time)}</span><span>Checked ${new Date().toLocaleTimeString("id-ID")}</span></div>`;
 }
@@ -455,7 +562,20 @@ try {
 document.querySelectorAll("#chart-ranges button").forEach((button) => {
   button.onclick = () => {
     currentChartRange = button.dataset.range;
+    chartFitMode = true;
+    currentChartZoom = 1;
     if (currentChartSymbol) loadChart(currentChartSymbol, currentChartRange);
+  };
+});
+document.querySelectorAll("#chart-zoom button").forEach((button) => {
+  button.onclick = () => {
+    if (!currentChartSymbol) return;
+    if (button.dataset.zoom === "fit") { chartFitMode = true; currentChartZoom = 1; }
+    else {
+      chartFitMode = false;
+      currentChartZoom = Math.max(.6, Math.min(3, currentChartZoom + (button.dataset.zoom === "in" ? .35 : -.35)));
+    }
+    loadChart(currentChartSymbol, currentChartRange);
   };
 });
 document.querySelector("#live-symbol").addEventListener("keydown", (event) => {

@@ -13,6 +13,7 @@ class TradePlanSerializer(serializers.ModelSerializer):
             "symbol",
             "trading_date",
             "strategy",
+            "decision_window",
             "status",
             "score",
             "confidence",

@@ -76,6 +76,18 @@ CELERY_BROKER_URL = REDIS_URL or "memory://"
 CELERY_RESULT_BACKEND = REDIS_URL or "cache+memory://"
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_BEAT_SCHEDULE = {
+    "build-open-0930-plan": {
+        "task": "trading.tasks.build_open_plan",
+        "schedule": crontab(hour=9, minute=30, day_of_week="1-5"),
+    },
+    "build-midday-1130-plan": {
+        "task": "trading.tasks.build_midday_plan",
+        "schedule": crontab(hour=11, minute=30, day_of_week="1-5"),
+    },
+    "collect-intraday-candidates": {
+        "task": "trading.tasks.collect_intraday_candidates",
+        "schedule": crontab(minute="*/5", hour="9-15", day_of_week="1-5"),
+    },
     "prepare-tomorrow-plan": {
         "task": "trading.tasks.build_daily_plan",
         "schedule": crontab(hour=16, minute=20, day_of_week="1-5"),

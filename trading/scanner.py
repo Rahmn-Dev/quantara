@@ -2,6 +2,7 @@ from django.conf import settings
 from django.utils import timezone
 from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
+from dataclasses import replace
 
 def broadcast_log(message: str, verbose: bool):
     if not verbose:
@@ -61,12 +62,15 @@ from .evaluation import evaluate_predictions
 def scan_market(
     *, equity=100_000_000, sync=True, verbose=False, min_ml_probability=None,
     min_rr=None, max_risk=None, max_daily_loss=None, min_score=None,
-    min_profit_factor=None
+    min_profit_factor=None, decision_window=None
 ):
+    if decision_window is None:
+        now = timezone.localtime()
+        decision_window = "OPEN_0930" if now.hour < 10 else ("MIDDAY_1130" if now.hour < 15 else "CLOSE_FINAL")
     broadcast_log(f"Starting market scan (sync={sync})...", verbose)
-    run = ScanRun.objects.create(source="yahoo", interval="1d")
+    run = ScanRun.objects.create(source="yahoo", interval="1d", decision_window=decision_window)
     provider = YahooMarketData()
-    decisions, errors, freshest = [], [], None
+    decisions, snapshots, errors, freshest = [], [], [], None
     limits = settings.QUANT_LIMITS
     effective = {
         "min_signal_score": float(min_score if min_score is not None else limits["min_signal_score"]),
@@ -76,7 +80,7 @@ def scan_market(
         "max_daily_loss": float(max_daily_loss if max_daily_loss is not None else limits["max_daily_loss"]),
         "min_profit_factor": float(min_profit_factor if min_profit_factor is not None else limits["min_profit_factor"]),
         "equity": float(equity),
-        "quant_weights": {"momentum": 0.28, "relative_volume": 0.22, "vwap": 0.15, "volatility": 0.12, "liquidity": 0.13, "broker_flow_placeholder": 0.10},
+        "quant_weights": {"momentum": 0.31, "relative_volume": 0.24, "vwap": 0.17, "volatility": 0.13, "liquidity": 0.15, "broker_flow": 0.0},
     }
     instruments = Instrument.objects.filter(is_active=True)
     regime = "NEUTRAL"
@@ -110,6 +114,17 @@ def scan_market(
                 if result.latest and (not freshest or result.latest > freshest):
                     freshest = result.latest
             snapshot = build_snapshot(instrument)
+            snapshots.append((instrument, snapshot))
+        except Exception as exc:  # noqa: BLE001 - one bad ticker must not abort the market scan
+            errors.append(f"{instrument.symbol}: {exc}")
+    # Cross-sectional percentile is more informative than a score that saturates
+    # whenever rupiah turnover is merely large in absolute terms.
+    ordered_turnover = sorted(snapshot.median_turnover_20d for _, snapshot in snapshots)
+    turnover_count = max(1, len(ordered_turnover) - 1)
+    for instrument, snapshot in snapshots:
+        percentile = 100 * sum(value < snapshot.median_turnover_20d for value in ordered_turnover) / turnover_count
+        snapshot = replace(snapshot, liquidity_score=round(percentile, 2))
+        try:
             decision = create_decision(
                 snapshot,
                 equity=equity,
@@ -122,7 +137,7 @@ def scan_market(
         except Exception as exc:  # noqa: BLE001 - one bad ticker must not abort the market scan
             errors.append(f"{instrument.symbol}: {exc}")
     trading_date = timezone.localdate()
-    TradePlan.objects.filter(trading_date=trading_date, strategy="momentum").delete()
+    TradePlan.objects.filter(trading_date=trading_date, strategy="momentum", decision_window=decision_window).delete()
     performance = (
         PerformanceSnapshot.objects.filter(strategy="momentum_20d_rvol")
         .order_by("-computed_at")
@@ -188,11 +203,17 @@ def scan_market(
             "atr_percent": round(snapshot.atr_percent, 6), "liquidity_score": round(snapshot.liquidity_score, 2),
             "broker_flow_score": round(snapshot.broker_flow_score, 2), "broker_flow_source": "neutral_placeholder_no_broker_feed",
             "gap_percent": round(snapshot.gap_percent, 6), "market_regime": regime,
+            "momentum_5d": round(snapshot.momentum_5d, 6), "momentum_60d": round(snapshot.momentum_60d, 6),
+            "momentum_120d": round(snapshot.momentum_120d, 6), "volatility_20d": round(snapshot.volatility_20d, 6),
+            "distance_to_sma20": round(snapshot.distance_to_sma20, 6), "rsi_14": round(snapshot.rsi_14, 2),
+            "bollinger_position": round(snapshot.bollinger_position, 4), "consecutive_green_days": snapshot.consecutive_green_days,
+            "volume_climax": round(snapshot.volume_climax, 4), "median_turnover_20d": round(snapshot.median_turnover_20d, 2),
         }
         plan, _ = TradePlan.objects.update_or_create(
             instrument=instrument,
             trading_date=trading_date,
             strategy="momentum",
+            decision_window=decision_window,
             defaults={
                 **values,
                 "ranking_score": ranking_score,
@@ -212,6 +233,7 @@ def scan_market(
                 signal_date=trading_date,
                 model_name=model_run.name if model_run else "unversioned",
                 horizon_days=1,
+                decision_window=decision_window,
                 defaults={
                     "trade_plan": plan,
                     "model_probability": ml_probability,
@@ -222,6 +244,7 @@ def scan_market(
                         "indicators": indicator_evidence,
                         "scan_settings": effective,
                         "ranking_score": ranking_score,
+                        "decision_window": decision_window,
                         "checks": values["checks"],
                         "veto_reasons": values["veto_reasons"],
                     },

@@ -13,6 +13,16 @@ class Snapshot:
     liquidity_score: float
     broker_flow_score: float = 50.0
     gap_percent: float = 0.0
+    momentum_5d: float = 0.0
+    momentum_60d: float = 0.0
+    momentum_120d: float = 0.0
+    volatility_20d: float = 0.0
+    distance_to_sma20: float = 0.0
+    rsi_14: float = 50.0
+    bollinger_position: float = 0.5
+    consecutive_green_days: int = 0
+    volume_climax: float = 1.0
+    median_turnover_20d: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -40,19 +50,25 @@ def clamp(value, low=0.0, high=100.0):
 
 def quant_score(s: Snapshot) -> float:
     """Transparent score; every input is measurable and independently testable."""
-    momentum = clamp(50 + s.momentum_20d * 250)
+    momentum = clamp(50 + s.momentum_5d * 140 + s.momentum_20d * 130 + s.momentum_60d * 45)
     volume = clamp((s.relative_volume - 0.5) * 50)
     vwap = clamp(70 + s.distance_to_vwap * 500)
     volatility = clamp(100 - abs(s.atr_percent - 0.035) * 1800)
-    return round(
-        0.28 * momentum
-        + 0.22 * volume
-        + 0.15 * vwap
-        + 0.12 * volatility
-        + 0.13 * s.liquidity_score
-        + 0.10 * s.broker_flow_score,
-        2,
+    base = (
+        0.31 * momentum
+        + 0.24 * volume
+        + 0.17 * vwap
+        + 0.13 * volatility
+        + 0.15 * s.liquidity_score
     )
+    # Prevent trend-following from becoming blind performance chasing.
+    penalty = 0.0
+    penalty += max(0.0, s.rsi_14 - 70) * 0.65
+    penalty += max(0.0, s.distance_to_sma20 - 0.09) * 150
+    penalty += max(0.0, s.bollinger_position - 1.05) * 18
+    penalty += max(0, s.consecutive_green_days - 4) * 1.75
+    penalty += max(0.0, s.volume_climax - 3.0) * 2.0
+    return round(clamp(base - min(penalty, 28)), 2)
 
 
 def create_decision(
@@ -84,6 +100,12 @@ def create_decision(
         "vwap": s.distance_to_vwap >= 0,
         "regime": regime != "HIGH_RISK",
         "liquidity": s.liquidity_score >= 55,
+        "not_overextended": (
+            s.rsi_14 <= 78
+            and s.distance_to_sma20 <= 0.15
+            and s.consecutive_green_days <= 6
+            and s.volume_climax <= 5
+        ),
     }
     reasons = [name.replace("_", " ").title() for name, passed in checks.items() if not passed]
     ready = all(checks.values()) and size > 0

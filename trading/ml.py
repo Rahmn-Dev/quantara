@@ -12,7 +12,7 @@ from sklearn.metrics import accuracy_score, brier_score_loss, log_loss, precisio
 
 from .models import Candle, ModelRun
 
-FEATURES = ["ret_5", "ret_20", "rvol", "volatility", "sma20_distance", "range_pct"]
+FEATURES = ["ret_5", "ret_20", "ret_60", "ret_120", "rvol", "volatility", "sma20_distance", "range_pct", "rsi_14", "bollinger_position", "consecutive_green"]
 ARTIFACT_DIR = Path(settings.BASE_DIR) / "artifacts"
 ARTIFACT_PATH = ARTIFACT_DIR / "champion.joblib"
 
@@ -66,12 +66,24 @@ def training_frame():
             frame[column] = pd.to_numeric(frame[column])
         frame["ret_5"] = frame.close.pct_change(5)
         frame["ret_20"] = frame.close.pct_change(20)
+        frame["ret_60"] = frame.close.pct_change(60)
+        frame["ret_120"] = frame.close.pct_change(120)
         frame["rvol"] = frame.volume / frame.volume.rolling(20).median()
         frame["volatility"] = frame.close.pct_change().rolling(20).std()
         frame["sma20_distance"] = frame.close / frame.close.rolling(20).mean() - 1
         frame["range_pct"] = (frame.high - frame.low) / frame.close
-        frame["future_return"] = frame.close.shift(-5) / frame.close - 1 - 0.003
-        frame["target"] = (frame.future_return > 0.01).astype(int)
+        delta = frame.close.diff()
+        avg_gain = delta.clip(lower=0).rolling(14).mean()
+        avg_loss = -delta.clip(upper=0).rolling(14).mean()
+        frame["rsi_14"] = 100 - 100 / (1 + avg_gain / avg_loss.replace(0, 1e-9))
+        sma20 = frame.close.rolling(20).mean()
+        std20 = frame.close.rolling(20).std()
+        frame["bollinger_position"] = (frame.close - (sma20 - 2 * std20)) / (4 * std20).replace(0, 1e-9)
+        green = (frame.close > frame.open).astype(int)
+        frame["consecutive_green"] = green.groupby((green == 0).cumsum()).cumsum()
+        # NEXT DAY target: next close must clear estimated round-trip friction.
+        frame["future_return"] = frame.close.shift(-1) / frame.close - 1 - 0.0045
+        frame["target"] = (frame.future_return > 0).astype(int)
         frame["instrument_id"] = instrument_id
         samples.append(frame.dropna(subset=FEATURES + ["future_return"]))
     return pd.concat(samples).sort_values("timestamp").reset_index(drop=True)
@@ -117,6 +129,8 @@ def train_champion():
             "walk_forward": fold_metrics,
             "mean_auc": round(mean_auc, 4),
             "positive_rate": round(float(frame.target.mean()), 4),
+            "target_horizon_days": 1,
+            "target_definition": "next_close_return_after_0.45pct_friction_positive",
             "calibration": "sigmoid_temporal_holdout",
             "calibration_start": champion_calibration_start,
             "mean_brier": round(float(np.mean([fold["brier"] for fold in fold_metrics])), 4),
@@ -141,12 +155,17 @@ def predict_probability(snapshot):
     vector = pd.DataFrame(
         [
             {
-                "ret_5": snapshot.momentum_20d / 4,
+                "ret_5": snapshot.momentum_5d,
                 "ret_20": snapshot.momentum_20d,
+                "ret_60": snapshot.momentum_60d,
+                "ret_120": snapshot.momentum_120d,
                 "rvol": snapshot.relative_volume,
-                "volatility": snapshot.atr_percent / 2,
-                "sma20_distance": snapshot.distance_to_vwap,
+                "volatility": snapshot.volatility_20d,
+                "sma20_distance": snapshot.distance_to_sma20,
                 "range_pct": snapshot.atr_percent,
+                "rsi_14": snapshot.rsi_14,
+                "bollinger_position": snapshot.bollinger_position,
+                "consecutive_green": snapshot.consecutive_green_days,
             }
         ],
         columns=bundle["features"],
