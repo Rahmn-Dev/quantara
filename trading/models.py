@@ -6,6 +6,11 @@ class Instrument(models.Model):
     name = models.CharField(max_length=160, blank=True)
     sector = models.CharField(max_length=80, blank=True)
     is_active = models.BooleanField(default=True)
+    # Risk flags synced from IDX (Phase 4)
+    audit_risky = models.BooleanField(default=False)
+    audit_opinion = models.CharField(max_length=40, blank=True)
+    has_recent_dilution = models.BooleanField(default=False)
+    risk_flags_updated_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return self.symbol
@@ -219,3 +224,92 @@ class DemoOrder(models.Model):
 
     class Meta:
         ordering = ["-submitted_at"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — Broker Flow / Bandarmologi
+# ---------------------------------------------------------------------------
+
+class BrokerFlow(models.Model):
+    """Daily broker concentration data scraped from IDX BrokerSummary API."""
+
+    instrument = models.ForeignKey(Instrument, on_delete=models.CASCADE, related_name="broker_flows")
+    trading_date = models.DateField(db_index=True)
+    cr1 = models.FloatField(null=True, blank=True, help_text="Top-1 broker buy concentration (%)")
+    cr3 = models.FloatField(null=True, blank=True, help_text="Top-3 broker buy concentration (%)")
+    cr5 = models.FloatField(null=True, blank=True, help_text="Top-5 broker buy concentration (%)")
+    institutional_score = models.FloatField(default=50.0, help_text="0-100, higher = stronger bandar activity")
+    net_foreign_value = models.FloatField(null=True, blank=True, help_text="Net foreign buy value (Rp)")
+    top_brokers = models.JSONField(default=list, help_text="Top 10 brokers with buy/sell/net values")
+    raw_available = models.BooleanField(default=False)
+    fetched_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-trading_date"]
+        constraints = [
+            models.UniqueConstraint(fields=["instrument", "trading_date"], name="unique_broker_flow")
+        ]
+
+    def __str__(self):
+        return f"{self.instrument.symbol} {self.trading_date} CR3={self.cr3}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Financial Fundamentals
+# ---------------------------------------------------------------------------
+
+class FundamentalSnapshot(models.Model):
+    """Annual financial ratios synced from IDX DigitalStatistic API."""
+
+    instrument = models.ForeignKey(Instrument, on_delete=models.CASCADE, related_name="fundamentals")
+    period_year = models.PositiveSmallIntegerField(db_index=True)
+    period_quarter = models.PositiveSmallIntegerField(default=4)
+    per = models.FloatField(null=True, blank=True, help_text="Price-to-Earnings Ratio")
+    pbv = models.FloatField(null=True, blank=True, help_text="Price-to-Book Value")
+    roe = models.FloatField(null=True, blank=True, help_text="Return on Equity (%)")
+    der = models.FloatField(null=True, blank=True, help_text="Debt-to-Equity Ratio")
+    eps = models.FloatField(null=True, blank=True, help_text="Earnings Per Share")
+    revenue_growth = models.FloatField(null=True, blank=True, help_text="Revenue growth YoY (%)")
+    synced_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-period_year", "-period_quarter"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["instrument", "period_year", "period_quarter"],
+                name="unique_fundamental_period"
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.instrument.symbol} FY{self.period_year}Q{self.period_quarter} PER={self.per}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Foreign Flow
+# ---------------------------------------------------------------------------
+
+class ForeignFlow(models.Model):
+    """Daily net foreign buy/sell data from IDX StockSummary API."""
+
+    instrument = models.ForeignKey(Instrument, on_delete=models.CASCADE, related_name="foreign_flows")
+    trading_date = models.DateField(db_index=True)
+    net_foreign_buy = models.FloatField(default=0, help_text="Net foreign buy value in Rp (positive = buy)")
+    net_foreign_volume = models.BigIntegerField(default=0)
+    foreign_buy_value = models.FloatField(default=0)
+    foreign_sell_value = models.FloatField(default=0)
+    signal = models.CharField(
+        max_length=12,
+        default="NEUTRAL",
+        choices=[("ACCUMULATE", "Accumulate"), ("DISTRIBUTE", "Distribute"), ("NEUTRAL", "Neutral")],
+    )
+    fetched_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-trading_date"]
+        constraints = [
+            models.UniqueConstraint(fields=["instrument", "trading_date"], name="unique_foreign_flow")
+        ]
+
+    def __str__(self):
+        return f"{self.instrument.symbol} {self.trading_date} {self.signal} {self.net_foreign_buy:+.0f}"

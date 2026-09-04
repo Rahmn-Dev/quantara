@@ -43,10 +43,7 @@
               <option value="0.65" selected>65%</option>
             </select>
           </label>
-          <label
-            style="color: var(--text-muted); font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 6px;">
-            <input type="checkbox" id="verbose-scan" style="accent-color: var(--accent-lime);"> Verbose
-          </label>
+
           <button id="scan" class="action-btn">Run Market Scan</button>
         </div>
       </header>
@@ -86,6 +83,8 @@
             class="neon-text">—</strong><small id="proof-note">Waiting for evaluated calls</small></article>
         <article id="quality-card" class="metric-state"><label>ENGINE QUALITY</label><strong id="engine-quality"
             class="neon-text">—</strong><small id="engine-quality-note">Conservative composite score</small></article>
+        <article id="idx-data-card" class="metric-state"><label>IDX DATA</label><strong id="idx-data-status"
+            class="neon-text">—</strong><small id="idx-data-note">Broker flow · Fundamental · Foreign</small></article>
       </section>
 
       <!-- Today's Playbook -->
@@ -175,8 +174,33 @@
         </details>
       </section>
 
-      <!-- Market Scanner -->
-      <section class="board widget-glass span-col-8 scanner-panel">
+      <!-- IDX-BEI: Bandarmologi & Signal Panel -->
+      <section class="board widget-glass span-col-12" id="bandarmologi-panel">
+        <div class="section-title">
+          <div>
+            <p class="eyebrow">IDX-BEI INTEGRATION · BANDARMOLOGI</p>
+            <h2>🏦 Broker Dominance &amp; Smart Money Flow</h2>
+          </div>
+          <span class="truth">Data scraped live from IDX API · CR = Concentration Ratio</span>
+        </div>
+        <div id="bandarmologi-cards" class="bandarmologi-grid">
+          <div class="empty">Run a market scan to load bandarmologi data.</div>
+        </div>
+        <details class="metric-guide" style="margin-top: 16px;">
+          <summary>Cara membaca Bandarmologi</summary>
+          <div class="metric-guide-grid">
+            <article><b>CR1</b><p>Dominasi broker <b>terbesar</b> dalam volume beli. CR1 &gt; 30% = satu broker sangat dominan (high bandar activity).</p></article>
+            <article><b>CR3</b><p>Gabungan <b>3 broker teratas</b>. CR3 &gt; 50% = konsentrasi tinggi, potensi akumulasi terkoordinasi.</p></article>
+            <article><b>Institutional Score</b><p>Skor 0–100 gabungan CR1+CR3. &gt;70 = strong bandar signal. &lt;40 = retail-dominated.</p></article>
+            <article><b>Foreign Flow</b><p>Net beli/jual asing 5 hari. ACCUMULATE = asing net beli ≥3 hari dari 5. DISTRIBUTE = asing net jual dominan.</p></article>
+            <article><b>DER (Debt/Equity)</b><p>Rasio utang. DER &gt; 3x = over-leveraged, dapat diveto oleh engine.</p></article>
+            <article><b>ROE</b><p>Return on Equity. ROE &gt; 15% bersama PER &lt; 15 = value candidate.</p></article>
+          </div>
+        </details>
+      </section>
+
+      <!-- Risk Controls -->
+      <section class="board widget-glass span-col-8">
         <div class="section-title">
           <div>
             <p class="eyebrow">FULL IDX UNIVERSE</p>
@@ -202,8 +226,11 @@
                 <th>Symbol</th>
                 <th>Company</th>
                 <th>Last Price</th>
-                <th>ML Probability</th>
-                <th>Quant Score</th>
+                <th>ML Prob</th>
+                <th>Score</th>
+                <th>🏦 Bandar</th>
+                <th>🌏 Asing</th>
+                <th>📊 Fund.</th>
                 <th>Status</th>
               </tr>
             </thead>

@@ -42,7 +42,7 @@ def fetch_ai_insights_bg(plans_with_values, verbose):
 
 
 from .engine import create_decision
-from .features import build_snapshot
+from .features import build_snapshot, get_foreign_flow_signal, get_fundamental
 from .market_data import YahooMarketData
 from .ml import predict_probability
 from .models import (
@@ -80,7 +80,7 @@ def scan_market(
         "max_daily_loss": float(max_daily_loss if max_daily_loss is not None else limits["max_daily_loss"]),
         "min_profit_factor": float(min_profit_factor if min_profit_factor is not None else limits["min_profit_factor"]),
         "equity": float(equity),
-        "quant_weights": {"momentum": 0.31, "relative_volume": 0.24, "vwap": 0.17, "volatility": 0.13, "liquidity": 0.15, "broker_flow": 0.0},
+        "quant_weights": {"momentum": 0.20, "relative_volume": 0.15, "vwap": 0.15, "volatility": 0.15, "liquidity": 0.15, "broker_flow": 0.20},
     }
     instruments = Instrument.objects.filter(is_active=True)
     regime = "NEUTRAL"
@@ -125,6 +125,14 @@ def scan_market(
         percentile = 100 * sum(value < snapshot.median_turnover_20d for value in ordered_turnover) / turnover_count
         snapshot = replace(snapshot, liquidity_score=round(percentile, 2))
         try:
+            # Phase 4: hard VETO for audit-risky instruments
+            if instrument.audit_risky:
+                errors.append(f"{instrument.symbol}: AUDIT VETO ({instrument.audit_opinion})")
+                continue
+
+            # Phase 2: fetch fundamental for DER guard
+            fundamental = get_fundamental(instrument)
+
             decision = create_decision(
                 snapshot,
                 equity=equity,
@@ -132,8 +140,11 @@ def scan_market(
                 regime=regime,
                 min_score=effective["min_signal_score"], min_rr=effective["min_risk_reward"],
                 max_risk=effective["max_risk_per_trade"], max_daily_loss=effective["max_daily_loss"],
+                fundamental=fundamental,
             )
-            decisions.append((decision, predict_probability(snapshot), snapshot))
+            # Phase 3: attach foreign flow signal
+            foreign_signal = get_foreign_flow_signal(instrument)
+            decisions.append((decision, predict_probability(snapshot), snapshot, foreign_signal, fundamental))
         except Exception as exc:  # noqa: BLE001 - one bad ticker must not abort the market scan
             errors.append(f"{instrument.symbol}: {exc}")
     trading_date = timezone.localdate()
@@ -150,7 +161,7 @@ def scan_market(
         decisions, key=lambda item: item[0].score * 0.45 + (item[1] or 0.5) * 55, reverse=True
     )[:7]
     
-    for decision, ml_probability, snapshot in ranked:
+    for decision, ml_probability, snapshot, foreign_signal, fundamental in ranked:
         values = decision.to_dict()
         values.pop("symbol")
         if ml_probability is not None:
@@ -201,14 +212,32 @@ def scan_market(
             "close": round(snapshot.close, 4), "momentum_20d": round(snapshot.momentum_20d, 6),
             "relative_volume": round(snapshot.relative_volume, 4), "distance_to_vwap": round(snapshot.distance_to_vwap, 6),
             "atr_percent": round(snapshot.atr_percent, 6), "liquidity_score": round(snapshot.liquidity_score, 2),
-            "broker_flow_score": round(snapshot.broker_flow_score, 2), "broker_flow_source": "neutral_placeholder_no_broker_feed",
+            "broker_flow_score": round(snapshot.broker_flow_score, 2),
+            "broker_flow_source": "idx_bandarmologi" if snapshot.broker_flow_score != 50.0 else "neutral_placeholder_no_broker_feed",
             "gap_percent": round(snapshot.gap_percent, 6), "market_regime": regime,
             "momentum_5d": round(snapshot.momentum_5d, 6), "momentum_60d": round(snapshot.momentum_60d, 6),
             "momentum_120d": round(snapshot.momentum_120d, 6), "volatility_20d": round(snapshot.volatility_20d, 6),
             "distance_to_sma20": round(snapshot.distance_to_sma20, 6), "rsi_14": round(snapshot.rsi_14, 2),
             "bollinger_position": round(snapshot.bollinger_position, 4), "consecutive_green_days": snapshot.consecutive_green_days,
             "volume_climax": round(snapshot.volume_climax, 4), "median_turnover_20d": round(snapshot.median_turnover_20d, 2),
+            # Phase 3: Foreign flow
+            "foreign_flow_signal": foreign_signal,
+            # Phase 2: Fundamentals
+            "per": fundamental.get("per"), "roe": fundamental.get("roe"),
+            "der": fundamental.get("der"), "eps": fundamental.get("eps"),
         }
+        
+        # Pull detailed bandarmologi from features
+        from .features import get_broker_flow_details
+        bf = get_broker_flow_details(instrument)
+        if bf:
+            indicator_evidence.update({
+                "cr1": float(bf.cr1) if bf.cr1 else None,
+                "cr3": float(bf.cr3) if bf.cr3 else None,
+                "cr5": float(bf.cr5) if bf.cr5 else None,
+                "top_brokers": bf.top_brokers,
+            })
+            
         plan, _ = TradePlan.objects.update_or_create(
             instrument=instrument,
             trading_date=trading_date,

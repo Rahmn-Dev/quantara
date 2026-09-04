@@ -100,6 +100,33 @@ CELERY_BEAT_SCHEDULE = {
         "task": "trading.tasks.score_predictions",
         "schedule": crontab(hour=16, minute=30, day_of_week="1-5"),
     },
+    # -----------------------------------------------------------------------
+    # IDX-BEI Integration: Broker Flow, Fundamentals, Foreign Flow, Risk
+    # -----------------------------------------------------------------------
+    "sync-broker-flows-morning": {
+        "task": "trading.tasks.sync_broker_flows_task",
+        "schedule": crontab(hour=9, minute=35, day_of_week="1-5"),
+    },
+    "sync-broker-flows-midday": {
+        "task": "trading.tasks.sync_broker_flows_task",
+        "schedule": crontab(hour=12, minute=5, day_of_week="1-5"),
+    },
+    "sync-broker-flows-close": {
+        "task": "trading.tasks.sync_broker_flows_task",
+        "schedule": crontab(hour=16, minute=10, day_of_week="1-5"),
+    },
+    "sync-foreign-flows-daily": {
+        "task": "trading.tasks.sync_foreign_flows_task",
+        "schedule": crontab(hour=16, minute=35, day_of_week="1-5"),
+    },
+    "sync-risk-screens-daily": {
+        "task": "trading.tasks.sync_risk_screens_task",
+        "schedule": crontab(hour=17, minute=0, day_of_week="1-5"),
+    },
+    "sync-fundamentals-weekly": {
+        "task": "trading.tasks.sync_fundamentals_task",
+        "schedule": crontab(hour=6, minute=0, day_of_week="0"),  # Sunday 06:00 WIB
+    },
 }
 QUANT_LIMITS = {
     "max_risk_per_trade": env.float("MAX_RISK_PER_TRADE", default=0.01),

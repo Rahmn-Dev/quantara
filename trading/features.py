@@ -2,7 +2,61 @@ import numpy as np
 import pandas as pd
 
 from .engine import Snapshot
-from .models import Candle, Instrument
+from .models import BrokerFlow, Candle, ForeignFlow, FundamentalSnapshot, Instrument
+
+
+def get_broker_flow_score(instrument: Instrument) -> float:
+    """
+    Returns the institutional_score (0-100) from the most recent BrokerFlow
+    record for this instrument. Falls back to neutral 50 if no data.
+    """
+    bf = get_broker_flow_details(instrument)
+    return bf.institutional_score if bf else 50.0
+
+def get_broker_flow_details(instrument: Instrument):
+    """Returns the most recent BrokerFlow object for this instrument."""
+    return (
+        BrokerFlow.objects
+        .filter(instrument=instrument, raw_available=True)
+        .order_by("-trading_date")
+        .first()
+    )
+
+
+def get_foreign_flow_signal(instrument: Instrument) -> str:
+    """
+    Returns the most recent ForeignFlow signal: ACCUMULATE / DISTRIBUTE / NEUTRAL.
+    """
+    ff = (
+        ForeignFlow.objects
+        .filter(instrument=instrument)
+        .order_by("-trading_date")
+        .first()
+    )
+    return ff.signal if ff else "NEUTRAL"
+
+
+def get_fundamental(instrument: Instrument) -> dict:
+    """
+    Returns the most recent FundamentalSnapshot as a dict.
+    Returns empty dict if no data is available yet.
+    """
+    fs = (
+        FundamentalSnapshot.objects
+        .filter(instrument=instrument)
+        .order_by("-period_year", "-period_quarter")
+        .first()
+    )
+    if not fs:
+        return {}
+    return {
+        "per": fs.per,
+        "pbv": fs.pbv,
+        "roe": fs.roe,
+        "der": fs.der,
+        "eps": fs.eps,
+        "revenue_growth": fs.revenue_growth,
+    }
 
 
 def candle_frame(instrument: Instrument, interval="1d") -> pd.DataFrame:
@@ -60,7 +114,7 @@ def build_snapshot(instrument: Instrument) -> Snapshot:
         distance_to_vwap=float(close.iloc[-1] / vwap20 - 1),
         atr_percent=float(atr_pct),
         liquidity_score=float(liquidity),
-        broker_flow_score=50,
+        broker_flow_score=get_broker_flow_score(instrument),  # Real IDX data (Phase 1)
         gap_percent=float(frame.open.iloc[-1] / close.iloc[-2] - 1),
         momentum_5d=float(close.iloc[-1] / close.iloc[-6] - 1),
         momentum_60d=float(close.iloc[-1] / close.iloc[-61] - 1) if len(close) >= 61 else 0.0,

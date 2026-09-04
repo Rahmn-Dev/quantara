@@ -11,6 +11,12 @@ from .models import Candle, DemoAccount, DemoOrder, DemoPosition, PerformanceSna
 from .scanner import scan_market
 from .services import broadcast_plans
 
+# Phase 1-4 sync imports
+from .broker_flow_sync import sync_broker_flows
+from .foreign_flow_sync import sync_foreign_flows
+from .fundamental_sync import sync_fundamentals
+from .risk_screens import sync_audit_risk, sync_dilution_watch
+
 
 def market_collection_active(now=None, preopen_minutes=3):
     now = timezone.localtime(now or timezone.now())
@@ -138,3 +144,58 @@ def collect_intraday_candidates():
 @shared_task
 def score_predictions():
     return evaluate_predictions()
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — Broker Flow / Bandarmologi
+# ---------------------------------------------------------------------------
+
+@shared_task
+def sync_broker_flows_task(trading_date: str | None = None) -> dict:
+    """
+    Sync broker flow data (CR1, CR3, CR5, institutional score) for all active
+    instruments. Runs during market hours: 09:00, 12:00, 16:00 WIB.
+    """
+    return sync_broker_flows(trading_date=trading_date)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Financial Fundamentals
+# ---------------------------------------------------------------------------
+
+@shared_task
+def sync_fundamentals_task(year: int | None = None, quarter: int = 4) -> dict:
+    """
+    Sync annual financial ratios (PER, PBV, ROE, DER, EPS) for all listed stocks.
+    Runs weekly on Sunday 06:00 WIB.
+    """
+    return sync_fundamentals(year=year, quarter=quarter)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Foreign Flow Radar
+# ---------------------------------------------------------------------------
+
+@shared_task
+def sync_foreign_flows_task(trading_date: str | None = None) -> dict:
+    """
+    Sync net foreign buy/sell from IDX StockSummary + compute rolling 5-day signal.
+    Runs daily at 16:30 WIB (after market close).
+    """
+    return sync_foreign_flows(trading_date=trading_date)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Audit Risk + Dilution Watch
+# ---------------------------------------------------------------------------
+
+@shared_task
+def sync_risk_screens_task() -> dict:
+    """
+    Sync audit opinions and dilutive corporate actions for all active instruments.
+    Updates Instrument.audit_risky + Instrument.has_recent_dilution flags.
+    Runs daily at 17:00 WIB (after market close).
+    """
+    audit_result = sync_audit_risk()
+    dilution_result = sync_dilution_watch()
+    return {"audit": audit_result, "dilution": dilution_result}

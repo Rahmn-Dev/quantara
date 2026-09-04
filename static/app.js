@@ -22,14 +22,26 @@ function technicalEvidence(plan) {
     ["RSI 14", Number(i.rsi_14 || 0).toFixed(1), Number(i.rsi_14) <= 78, "Di atas 70 mulai panas; >78 diveto"],
     ["Jarak SMA20", signedPct(i.distance_to_sma20), Number(i.distance_to_sma20) <= .15, "Terlalu jauh meningkatkan risiko koreksi"],
     ["Green streak", `${Number(i.consecutive_green_days || 0)} hari`, Number(i.consecutive_green_days) <= 6, "Mencegah mengejar kenaikan beruntun"],
+    // Phase 1: Broker Flow
+    ["Broker Flow Score", i.broker_flow_score != null ? `${Number(i.broker_flow_score).toFixed(1)}/100` : "—",
+      i.broker_flow_score != null && i.broker_flow_score !== 50, i.broker_flow_source === "idx_bandarmologi" ? "🏦 Real IDX bandarmologi data" : "🔴 Placeholder — belum ada data broker IDX"],
+    // Phase 3: Foreign Flow
+    ["Foreign Flow", i.foreign_flow_signal || "NEUTRAL",
+      i.foreign_flow_signal === "ACCUMULATE", i.foreign_flow_signal === "ACCUMULATE" ? "🌏 Asing net beli 3+ hari dari 5" : i.foreign_flow_signal === "DISTRIBUTE" ? "⚠️ Asing net jual dominan" : "Netral — belum ada tren jelas"],
+    // Phase 2: Fundamentals
+    ["PER", i.per != null ? Number(i.per).toFixed(1) + "×" : "—",
+      i.per != null && i.per < 20, i.per != null ? (i.per < 12 ? "Value territory (PER < 12)" : i.per < 20 ? "Normal range" : "Premium valuation") : "Data belum disync"],
+    ["ROE", i.roe != null ? Number(i.roe).toFixed(1) + "%" : "—",
+      i.roe != null && i.roe >= 15, i.roe != null ? (i.roe >= 20 ? "Excellent profitability" : i.roe >= 15 ? "Good ROE" : "Below average") : "Data belum disync"],
+    ["DER", i.der != null ? Number(i.der).toFixed(2) + "×" : "—",
+      i.der == null || i.der <= 3.0, i.der != null ? (i.der > 3.0 ? "🔴 Over-leveraged — dapat diveto engine" : i.der > 1.5 ? "Moderate leverage" : "Low leverage") : "Data belum disync"],
   ];
   const checks = Object.entries(plan.checks || {}).map(([name, pass]) => `<span class="evidence-check ${pass ? "pass" : "fail"}">${pass ? "✓" : "×"} ${escapeHtml(name.replaceAll("_", " "))}</span>`).join("");
   return `<div class="evidence-heading"><div><strong>Technical evidence at scan</strong><small>Snapshot tersimpan · bukan perubahan retroaktif</small></div><b>${Number(plan.ranking_score || 0).toFixed(2)} RANK</b></div>
     <div class="evidence-grid">${rows.map(([label,value,pass,help]) => `<div class="evidence-item ${pass ? "positive" : "negative"}"><span>${label}</span><b>${value}</b><small>${help}</small></div>`).join("")}</div>
     <div class="evidence-formula"><b>Mengapa masuk kandidat?</b><span>Ranking = Quant ${Number(plan.score).toFixed(1)} × 45% + ML ${(Number(plan.confidence) * 100).toFixed(1)}% × 55% = <strong>${Number(plan.ranking_score || 0).toFixed(2)}</strong>. Status ${plan.status} menentukan apakah actionable.</span></div>
     <div class="evidence-checks">${checks}</div>
-    <div class="evidence-settings"><b>Setting scan:</b> Quant ≥ ${s.min_signal_score ?? "—"} · ML ≥ ${s.min_ml_probability != null ? Math.round(s.min_ml_probability * 100) + "%" : "—"} · R/R ≥ ${s.min_risk_reward ?? "—"} · Risk ${s.max_risk_per_trade != null ? (s.max_risk_per_trade * 100).toFixed(1) + "%" : "—"}</div>
-    <p class="evidence-warning">Broker flow belum terhubung dan bobotnya 0%. Sistem tidak lagi memberi poin dari placeholder.</p>`;
+    <div class="evidence-settings"><b>Setting scan:</b> Quant ≥ ${s.min_signal_score ?? "—"} · ML ≥ ${s.min_ml_probability != null ? Math.round(s.min_ml_probability * 100) + "%" : "—"} · R/R ≥ ${s.min_risk_reward ?? "—"} · Risk ${s.max_risk_per_trade != null ? (s.max_risk_per_trade * 100).toFixed(1) + "%" : "—"}</div>`;
 }
 
 async function load() {
@@ -76,10 +88,77 @@ async function load() {
     bindTechnicalButtons();
     bindPaperButtons();
     loadDemoAccount();
+    renderBandarmologi(data.plans);
+    // Update IDX data metric card
+    const idxStatus = document.querySelector("#idx-data-status");
+    const idxNote = document.querySelector("#idx-data-note");
+    if (idxStatus && data.plans.length) {
+      const hasRealBF = data.plans.some(p => p.indicators?.broker_flow_source === "idx_bandarmologi");
+      const hasFF = data.plans.some(p => p.indicators?.foreign_flow_signal && p.indicators.foreign_flow_signal !== "NEUTRAL");
+      const hasFund = data.plans.some(p => p.indicators?.per != null);
+      const count = [hasRealBF, hasFF, hasFund].filter(Boolean).length;
+      idxStatus.textContent = count === 0 ? "PENDING" : count === 3 ? "LIVE" : `${count}/3`;
+      idxStatus.style.color = count === 0 ? "var(--text-muted)" : count === 3 ? "var(--accent-lime)" : "var(--accent-gold)";
+      if (idxNote) idxNote.textContent = [hasRealBF?"🏦 Broker":"❌ Broker", hasFF?"🌏 Asing":"❌ Asing", hasFund?"📊 Fund":"❌ Fund"].join(" · ");
+    }
   } catch (_error) {
     document.querySelector("#live").textContent = "OFFLINE";
   }
 }
+
+function renderBandarmologi(plans) {
+  const container = document.querySelector("#bandarmologi-cards");
+  if (!container) return;
+  if (!plans || plans.length === 0) {
+    container.innerHTML = '<div class="empty">Run a market scan to load bandarmologi data.</div>';
+    return;
+  }
+  container.innerHTML = plans.map(plan => {
+    const i = plan.indicators || {};
+    const bf = i.broker_flow_score != null ? Number(i.broker_flow_score) : null;
+    const bfClass = bf !== null && bf !== 50 ? (bf >= 70 ? "bandar-high" : bf >= 50 ? "bandar-mid" : "bandar-low") : "bandar-neutral";
+    const cr1 = i.cr1 != null ? `${Number(i.cr1).toFixed(1)}%` : "—";
+    const cr3 = i.cr3 != null ? `${Number(i.cr3).toFixed(1)}%` : "—";
+    const cr5 = i.cr5 != null ? `${Number(i.cr5).toFixed(1)}%` : "—";
+    const ffSig = i.foreign_flow_signal || "NEUTRAL";
+    const ffEmoji = ffSig === "ACCUMULATE" ? "🟢" : ffSig === "DISTRIBUTE" ? "🔴" : "🟡";
+    const der = i.der != null ? Number(i.der).toFixed(2) + "×" : "—";
+    const roe = i.roe != null ? Number(i.roe).toFixed(1) + "%" : "—";
+    const per = i.per != null ? Number(i.per).toFixed(1) + "×" : "—";
+    const auditOk = !plan.checks?.audit_risky;
+    const isRealData = i.broker_flow_source === "idx_bandarmologi" || i.broker_flow_source === "stockbit";
+    return `<div class="bandar-card ${bfClass}">
+      <div class="bandar-card-header">
+        <span class="bandar-symbol">${plan.symbol}</span>
+        <span class="badge ${plan.status}">${plan.status}</span>
+        ${isRealData ? '<span class="bandar-live-dot" title="Real IDX/Stockbit data">●</span>' : '<span class="bandar-pending-dot" title="No broker data yet">○</span>'}
+      </div>
+      <div class="bandar-score">${bf !== null ? Math.round(bf) : "—"}<small>/100</small></div>
+      <div class="bandar-label">Institutional Score</div>
+      <div class="bandar-cr-row">
+        <div class="bandar-cr"><span>CR1</span><b>${cr1}</b></div>
+        <div class="bandar-cr"><span>CR3</span><b>${cr3}</b></div>
+        <div class="bandar-cr"><span>CR5</span><b>${cr5}</b></div>
+      </div>
+      <div class="bandar-meta">
+        <span>${ffEmoji} Asing: <b>${ffSig}</b></span>
+        <span>PER <b>${per}</b></span>
+        <span>ROE <b>${roe}</b></span>
+        <span>DER <b class="${i.der != null && i.der > 3 ? 'price-down' : ''}">${der}</b></span>
+      </div>
+      ${i.top_brokers && i.top_brokers.length > 0 ? `
+      <div class="bandar-top-brokers" style="margin-top: 12px; font-size: 11px; border-top: 1px solid var(--border); padding-top: 8px;">
+        <div style="color: var(--text-muted); margin-bottom: 4px;">Top Brokers (Net)</div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          ${i.top_brokers.slice(0, 3).map(b => `<span title="Net: ${b.net.toLocaleString()} IDR"><b>${b.code}</b> <span class="${b.net > 0 ? 'price-up' : 'price-down'}">${b.net > 0 ? 'B' : 'S'}</span></span>`).join('')}
+        </div>
+      </div>
+      ` : ''}
+    </div>`;
+  }).join("");
+}
+
+
 
 function bindPaperButtons() {
   document.querySelectorAll(".paper-order-control").forEach((control) => {
@@ -266,7 +345,7 @@ document.querySelector("#scan").onclick = async (event) => {
   button.textContent = "Scanning…";
   
   const offline = document.querySelector("#offline").checked;
-  const isVerbose = document.querySelector("#verbose-scan").checked;
+  const isVerbose = true;
   
   if (isVerbose) {
     const terminal = document.querySelector("#scan-terminal");
@@ -345,7 +424,20 @@ async function loadScanner() {
   const status = encodeURIComponent(document.querySelector("#status-filter").value);
   const response = await fetch(`/api/scanner/?page=${scannerPage}&size=50&q=${query}&status=${status}`);
   const data = await response.json();
-  document.querySelector("#scanner-body").innerHTML = data.results.map((row) => `<tr><td>${row.symbol}</td><td>${row.name || "—"}</td><td>${row.price ? money(row.price) : "—"}</td><td>${row.confidence ? Math.round(row.confidence * 100) + "%" : "—"}</td><td>${row.score ? Number(row.score).toFixed(2) : "—"}</td><td><span class="badge ${row.status}">${row.status}</span></td></tr>`).join("");
+  document.querySelector("#scanner-body").innerHTML = data.results.map((row) => {
+    const bfScore = row.indicators?.broker_flow_score;
+    const bfClass = bfScore != null && bfScore !== 50 ? (bfScore >= 65 ? "badge-bandar-high" : bfScore >= 45 ? "badge-bandar-mid" : "badge-bandar-low") : "badge-bandar-none";
+    const bfText = bfScore != null && bfScore !== 50 ? `${Number(bfScore).toFixed(0)}` : "—";
+    const ffSig = row.indicators?.foreign_flow_signal || "NEUTRAL";
+    const ffEmoji = ffSig === "ACCUMULATE" ? "↑↑" : ffSig === "DISTRIBUTE" ? "↓↓" : "→";
+    const ffClass = ffSig === "ACCUMULATE" ? "price-up" : ffSig === "DISTRIBUTE" ? "price-down" : "";
+    const der = row.indicators?.der;
+    const roe = row.indicators?.roe;
+    const per = row.indicators?.per;
+    const fundText = per != null ? `${Number(per).toFixed(0)}×` : "—";
+    const fundClass = der != null && der > 3 ? "price-down" : per != null && per < 15 && roe != null && roe >= 15 ? "price-up" : "";
+    return `<tr><td>${row.symbol}</td><td>${row.name || "—"}</td><td>${row.price ? money(row.price) : "—"}</td><td>${row.confidence ? Math.round(row.confidence * 100) + "%" : "—"}</td><td>${row.score ? Number(row.score).toFixed(2) : "—"}</td><td><span class="badge-bandar ${bfClass}">${bfText}</span></td><td><span class="${ffClass}">${ffEmoji} ${ffSig}</span></td><td><span class="${fundClass}">PER ${fundText}</span></td><td><span class="badge ${row.status}">${row.status}</span></td></tr>`;
+  }).join("");
   document.querySelector("#page-label").textContent = `Page ${data.page} · ${data.total} stocks`;
   document.querySelector("#prev-page").disabled = scannerPage === 1;
   document.querySelector("#next-page").disabled = scannerPage * data.size >= data.total;

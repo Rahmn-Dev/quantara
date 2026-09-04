@@ -1021,3 +1021,188 @@ footer {
 .plan-commentary table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
 .plan-commentary th, .plan-commentary td { border: 1px solid rgba(255,255,255,0.1); padding: 5px 8px; text-align: left; }
 .plan-commentary th { background: rgba(255,255,255,0.05); color: #fff; }
+
+/* ============================================================
+   IDX-BEI Integration: Bandarmologi, Scanner, Badges
+   Phase 1-4 additions
+   ============================================================ */
+
+/* Bandarmologi card grid */
+.bandarmologi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+  padding: 4px 0 8px;
+}
+
+.bandar-card {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 14px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  position: relative;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.bandar-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+}
+
+.bandar-card.bandar-high {
+  border-color: rgba(132, 204, 22, 0.35);
+  background: rgba(132, 204, 22, 0.05);
+}
+
+.bandar-card.bandar-mid {
+  border-color: rgba(234, 179, 8, 0.3);
+  background: rgba(234, 179, 8, 0.04);
+}
+
+.bandar-card.bandar-low {
+  border-color: rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.04);
+}
+
+.bandar-card.bandar-neutral {
+  border-color: rgba(255,255,255,0.06);
+  background: rgba(255,255,255,0.02);
+}
+
+.bandar-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bandar-symbol {
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--text-primary, #fff);
+  letter-spacing: 0.5px;
+}
+
+.bandar-live-dot {
+  color: #84cc16;
+  font-size: 10px;
+  animation: pulse 2s infinite;
+}
+
+.bandar-pending-dot {
+  color: #6b7280;
+  font-size: 10px;
+}
+
+.bandar-score {
+  font-size: 36px;
+  font-weight: 800;
+  line-height: 1;
+  color: #fff;
+}
+
+.bandar-score small {
+  font-size: 14px;
+  font-weight: 400;
+  color: #9ca3af;
+}
+
+.bandar-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #6b7280;
+}
+
+.bandar-cr-row {
+  display: flex;
+  gap: 6px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  padding-top: 8px;
+}
+
+.bandar-cr {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.bandar-cr span {
+  font-size: 9px;
+  text-transform: uppercase;
+  color: #6b7280;
+  letter-spacing: 0.5px;
+}
+
+.bandar-cr b {
+  font-size: 13px;
+  font-weight: 700;
+  color: #e2e8f0;
+}
+
+.bandar-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11px;
+  color: #9ca3af;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  padding-top: 8px;
+}
+
+.bandar-meta span {
+  background: rgba(255,255,255,0.04);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.bandar-meta b {
+  color: #e2e8f0;
+}
+
+/* Scanner bandar badge */
+.badge-bandar {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.badge-bandar.badge-bandar-high {
+  background: rgba(132, 204, 22, 0.15);
+  color: #84cc16;
+  border: 1px solid rgba(132, 204, 22, 0.25);
+}
+
+.badge-bandar.badge-bandar-mid {
+  background: rgba(234, 179, 8, 0.12);
+  color: #eab308;
+  border: 1px solid rgba(234, 179, 8, 0.2);
+}
+
+.badge-bandar.badge-bandar-low {
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.badge-bandar.badge-bandar-none {
+  background: rgba(255,255,255,0.04);
+  color: #6b7280;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+/* Price up/down helpers (reused for FF signal) */
+.price-up { color: #84cc16 !important; }
+.price-down { color: #ef4444 !important; }
+.price-flat { color: #9ca3af; }
+
+/* IDX DATA metric card accent */
+#idx-data-card { cursor: default; }

@@ -54,12 +54,16 @@ def quant_score(s: Snapshot) -> float:
     volume = clamp((s.relative_volume - 0.5) * 50)
     vwap = clamp(70 + s.distance_to_vwap * 500)
     volatility = clamp(100 - abs(s.atr_percent - 0.035) * 1800)
+    # Broker flow: rescale 0-100 score → 0-100 contribution
+    # Falls back to neutral (50) when no IDX data yet
+    broker_flow = clamp(s.broker_flow_score)
     base = (
-        0.31 * momentum
-        + 0.24 * volume
-        + 0.17 * vwap
-        + 0.13 * volatility
+        0.20 * momentum          # was 0.28; reduced for broker flow
+        + 0.15 * volume          # was 0.21
+        + 0.15 * vwap            # was 0.17
+        + 0.15 * volatility      # was 0.13
         + 0.15 * s.liquidity_score
+        + 0.20 * broker_flow     # EMPOWERED: 20% weight for Bandar dominance
     )
     # Prevent trend-following from becoming blind performance chasing.
     penalty = 0.0
@@ -81,6 +85,7 @@ def create_decision(
     min_rr=1.5,
     max_risk=0.01,
     max_daily_loss=0.02,
+    fundamental: dict | None = None,
 ) -> Decision:
     if not all(isfinite(v) for v in asdict(s).values() if isinstance(v, float)) or s.close <= 0:
         raise ValueError("Invalid market snapshot")
@@ -91,6 +96,18 @@ def create_decision(
     rr = (target - s.close) / (s.close - stop)
     risk_per_share = s.close - stop
     size = max(0, int((equity * max_risk) / risk_per_share) // 100 * 100)
+
+    # Phase 2: fundamental checks (soft; non-blocking by default)
+    fundamental = fundamental or {}
+    der = fundamental.get("der")
+    roe = fundamental.get("roe")
+    per = fundamental.get("per")
+    fundamental_clean = True
+    fundamental_veto_reason = None
+    if der is not None and der > 3.0:
+        fundamental_clean = False
+        fundamental_veto_reason = f"DER Over-Leveraged ({der:.1f}x > 3.0x)"
+
     checks = {
         "signal": score >= min_score,
         "risk_reward": rr >= min_rr,
@@ -106,8 +123,11 @@ def create_decision(
             and s.consecutive_green_days <= 6
             and s.volume_climax <= 5
         ),
+        "fundamental_clean": fundamental_clean,  # Phase 2: DER guard
     }
     reasons = [name.replace("_", " ").title() for name, passed in checks.items() if not passed]
+    if fundamental_veto_reason and not fundamental_clean:
+        reasons = [fundamental_veto_reason if r == "Fundamental Clean" else r for r in reasons]
     ready = all(checks.values()) and size > 0
     confidence = round(min(0.95, max(0.05, score / 100 * (sum(checks.values()) / len(checks)))), 3)
     return Decision(
