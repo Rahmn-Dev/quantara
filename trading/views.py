@@ -7,6 +7,7 @@ from django.utils import timezone
 from django.db import OperationalError, transaction
 import time
 from decimal import Decimal
+import datetime as dt
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
@@ -442,6 +443,23 @@ def demo_buy(request, plan_id):
     price = _paper_price(plan.instrument)
     if price is None:
         return Response({"error": "Harga pasar belum tersedia."}, status=409)
+    if plan.decision_window == "CLOSE_FINAL" and plan.trading_date >= timezone.localdate():
+        if DemoOrder.objects.filter(trade_plan=plan, side="BUY").exists():
+            return Response({"error": "Kandidat ini sudah berada di antrean next open."}, status=409)
+        next_session = plan.trading_date + dt.timedelta(days=1)
+        while next_session.weekday() >= 5:
+            next_session += dt.timedelta(days=1)
+        expires_at = timezone.make_aware(dt.datetime.combine(next_session, dt.time(10, 30)))
+        account, _ = DemoAccount.objects.get_or_create(pk=1)
+        order = DemoOrder.objects.create(
+            trade_plan=plan, side="BUY", account=account, instrument=plan.instrument,
+            requested_lots=lots, reference_price=price, expires_at=expires_at,
+            slippage_percent=0.001, reason="PENDING_NEXT_OPEN",
+            metadata={"decision_window": "CLOSE_FINAL", "manual_queue": True,
+                      "fill_policy": "next session entry-zone only"},
+        )
+        return Response({"id": order.id, "symbol": plan.instrument.symbol, "lots": lots,
+                         "queued": True, "expires_at": expires_at}, status=202)
     if not Decimal(str(plan.entry_low)) <= price <= Decimal(str(plan.entry_high)):
         return Response({"error": "Harga saat ini berada di luar entry zone."}, status=409)
     account, _ = DemoAccount.objects.select_for_update().get_or_create(pk=1)
@@ -458,7 +476,8 @@ def demo_buy(request, plan_id):
         reason="manual paper order", metadata={"plan_status": plan.status},
     )
     account.cash -= cost; account.save(update_fields=["cash", "updated_at"])
-    return Response({"id": position.id, "symbol": plan.instrument.symbol, "lots": lots, "fill_price": price}, status=201)
+    return Response({"id": position.id, "symbol": plan.instrument.symbol, "lots": lots,
+                     "fill_price": price, "queued": False}, status=201)
 
 
 def _demo_close_once(request, position_id):

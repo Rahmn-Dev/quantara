@@ -1,6 +1,6 @@
 from celery import shared_task
 from decimal import Decimal
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
@@ -9,7 +9,7 @@ from django.utils import timezone
 
 from .evaluation import evaluate_predictions
 from .market_data import YahooMarketData
-from .models import Candle, DemoAccount, DemoOrder, DemoPosition, Instrument, PerformanceSnapshot, TradePlan
+from .models import Candle, DemoAccount, DemoOrder, DemoPosition, Instrument, TradePlan
 from .scanner import scan_market
 from .services import broadcast_plans
 
@@ -41,71 +41,100 @@ def build_daily_plan():
 @shared_task
 def build_open_plan():
     run = scan_market(decision_window="OPEN_0930", strategy_profile="NEXT_DAY")
-    return {"scanned": run.instruments_scanned, "paper_orders": auto_paper_trade_plans("OPEN_0930")}
+    return {"scanned": run.instruments_scanned, "paper_orders": 0,
+            "note": "OPEN model is not independently validated; auto-entry disabled"}
 
 
 @shared_task
 def build_midday_plan():
     run = scan_market(decision_window="MIDDAY_1130", strategy_profile="NEXT_DAY")
-    return {"scanned": run.instruments_scanned, "paper_orders": auto_paper_trade_plans("MIDDAY_1130")}
+    return {"scanned": run.instruments_scanned, "paper_orders": 0,
+            "note": "MIDDAY model is not independently validated; auto-entry disabled"}
 
 
 @transaction.atomic
 def auto_paper_trade_plans(decision_window):
-    """Track top picks automatically without presenting them as validated live trades."""
-    if not settings.AUTO_PAPER_TRADING["enabled"]:
+    """Queue close-final candidates; never fabricate a fill after market close."""
+    if not settings.AUTO_PAPER_TRADING["enabled"] or decision_window != "CLOSE_FINAL":
         return 0
     account, _ = DemoAccount.objects.select_for_update().get_or_create(pk=1)
-    plans = (TradePlan.objects.filter(trading_date=timezone.localdate(), decision_window=decision_window)
+    plans = (TradePlan.objects.filter(trading_date=timezone.localdate(), decision_window=decision_window,
+                                      strategy="next_day")
              .select_related("instrument").order_by("-ranking_score")[:settings.AUTO_PAPER_TRADING["top_n"]])
-    filled = 0
-    strategy = plans.first().strategy if plans.exists() else None
-    performance = (
-        PerformanceSnapshot.objects.filter(strategy=strategy).order_by("-computed_at").first()
-        if strategy else None
-    )
-    edge_validated = bool(
-        performance and performance.trades >= 100
-        and performance.profit_factor >= 1.2 and performance.expectancy > 0
-    )
+    next_session = timezone.localdate() + timedelta(days=1)
+    while next_session.weekday() >= 5:
+        next_session += timedelta(days=1)
+    expires_at = timezone.make_aware(datetime.combine(next_session, time(10, 30)))
+    queued = 0
     for plan in plans:
         if DemoOrder.objects.filter(trade_plan=plan, side="BUY").exists():
             continue
         # Do not stack another automatic position in a symbol the user already tracks.
         if account.positions.filter(instrument=plan.instrument, status="OPEN").exists():
             continue
-        candle = Candle.objects.filter(instrument=plan.instrument, interval="5m").order_by("-timestamp").first()
-        if candle is None:
-            candle = Candle.objects.filter(instrument=plan.instrument, interval="1d").order_by("-timestamp").first()
+        candle = Candle.objects.filter(instrument=plan.instrument, interval="1d").order_by("-timestamp").first()
         if candle is None:
             continue
         reference = Decimal(candle.close)
         liquidity = float(plan.indicators.get("liquidity_score", 50))
         slippage = Decimal(str(min(0.005, max(0.001, 0.004 - liquidity / 25000))))
-        fill_price = reference * (Decimal("1") + slippage)
         risk_lots = max(1, plan.position_size // 100)
-        affordable_lots = int(account.cash / (fill_price * Decimal("100") * Decimal("1.0015")))
-        lots = min(risk_lots, affordable_lots)
-        expires_at = timezone.now() + timedelta(minutes=settings.AUTO_PAPER_TRADING["expiry_minutes"])
-        order = DemoOrder.objects.create(
+        DemoOrder.objects.create(
             account=account, instrument=plan.instrument, trade_plan=plan, requested_lots=max(1, risk_lots),
             reference_price=reference, expires_at=expires_at, slippage_percent=float(slippage),
-            reason="validated READY" if edge_validated and plan.status == "READY" else "automatic research tracking; edge not validated",
-            metadata={"decision_window": decision_window, "plan_status": plan.status, "profit_factor_gate_passed": edge_validated},
+            reason="PENDING_NEXT_OPEN",
+            metadata={"decision_window": decision_window, "plan_status": plan.status,
+                      "signal_date": str(plan.trading_date), "fill_policy": "next session entry-zone only"},
         )
-        if lots < 1:
-            order.status = DemoOrder.Status.REJECTED; order.reason = "paper cash insufficient"; order.save()
+        queued += 1
+    return queued
+
+
+@shared_task
+@transaction.atomic
+def process_pending_paper_orders():
+    """Fill yesterday's close-final candidates from genuine next-session bars."""
+    if not market_collection_active():
+        return {"filled": 0, "expired": 0, "state": "outside entry session"}
+    now = timezone.now(); today = timezone.localdate(); filled = expired = 0
+    orders = DemoOrder.objects.select_for_update().filter(
+        side="BUY", status=DemoOrder.Status.PENDING, reason="PENDING_NEXT_OPEN"
+    ).select_related("account", "instrument", "trade_plan")
+    for order in orders:
+        if order.expires_at and now > order.expires_at:
+            order.status = DemoOrder.Status.EXPIRED; order.reason = "NEXT_OPEN_ENTRY_EXPIRED"; order.save()
+            expired += 1; continue
+        plan = order.trade_plan
+        if not plan or plan.trading_date >= today:
             continue
-        shares = lots * 100
-        fee = fill_price * shares * Decimal("0.0015")
-        position = DemoPosition.objects.create(account=account, instrument=plan.instrument, trade_plan=plan,
-                                               shares=shares, entry_price=fill_price, entry_fee=fee)
-        account.cash -= fill_price * shares + fee
-        order.position = position; order.status = DemoOrder.Status.FILLED; order.filled_lots = lots
-        order.fill_price = fill_price; order.fee = fee; order.filled_at = timezone.now(); order.save()
-        filled += 1
-    account.save(update_fields=["cash", "updated_at"])
-    return filled
+        if order.account.positions.filter(instrument=order.instrument, status="OPEN").exists():
+            order.status = DemoOrder.Status.REJECTED; order.reason = "POSITION_ALREADY_OPEN"; order.save()
+            continue
+        candle = Candle.objects.filter(instrument=order.instrument, interval="5m").order_by("-timestamp").first()
+        if not candle or timezone.localdate(candle.timestamp) != today:
+            continue
+        candle_open, candle_low, candle_high = map(Decimal, (candle.open, candle.low, candle.high))
+        if candle_open > plan.entry_high or candle_high < plan.entry_low or candle_low > plan.entry_high:
+            continue
+        base_fill = candle_open if plan.entry_low <= candle_open <= plan.entry_high else Decimal(plan.entry_low)
+        fill_price = base_fill * (Decimal("1") + Decimal(str(order.slippage_percent)))
+        if fill_price > plan.entry_high:
+            continue
+        affordable = int(order.account.cash / (fill_price * Decimal("100") * Decimal("1.0015")))
+        lots = min(order.requested_lots, affordable)
+        if lots < 1:
+            order.status = DemoOrder.Status.REJECTED; order.reason = "PAPER_CASH_INSUFFICIENT"; order.save()
+            continue
+        shares = lots * 100; fee = fill_price * shares * Decimal("0.0015")
+        position = DemoPosition.objects.create(account=order.account, instrument=order.instrument,
+                                               trade_plan=plan, shares=shares,
+                                               entry_price=fill_price, entry_fee=fee)
+        order.account.cash -= fill_price * shares + fee
+        order.account.save(update_fields=["cash", "updated_at"])
+        order.position=position; order.status=DemoOrder.Status.FILLED; order.filled_lots=lots
+        order.fill_price=fill_price; order.fee=fee; order.filled_at=now
+        order.reason="NEXT_OPEN_ENTRY_ZONE_FILL"; order.save(); filled += 1
+    return {"filled": filled, "expired": expired}
 
 
 @shared_task
@@ -153,6 +182,8 @@ def collect_intraday_candidates():
     cache.set("intraday-rotation-cursor", cursor + 8, None)
     instruments = {item.id: item for item in plan_instruments}
     instruments.update({item.id: item for item in paper_instruments})
+    pending_ids = DemoOrder.objects.filter(side="BUY", status=DemoOrder.Status.PENDING).values_list("instrument_id", flat=True)
+    instruments.update({item.id: item for item in Instrument.objects.filter(id__in=pending_ids)})
     instruments.update({item.id: item for item in Instrument.objects.filter(id__in=batch_ids)})
     synced = 0
     for instrument in instruments.values():
@@ -162,6 +193,7 @@ def collect_intraday_candidates():
         except Exception:
             continue
     validate_live_setups.delay()
+    process_pending_paper_orders.delay()
     auto_close_paper_positions.delay()
     return synced
 
