@@ -14,13 +14,24 @@ def get_broker_flow_score(instrument: Instrument) -> float:
     return bf.institutional_score if bf else 50.0
 
 def get_broker_flow_details(instrument: Instrument):
-    """Returns the most recent BrokerFlow object for this instrument."""
-    return (
+    """Return broker flow only after strict integrity checks."""
+    flow = (
         BrokerFlow.objects
         .filter(instrument=instrument, raw_available=True)
         .order_by("-trading_date")
         .first()
     )
+    if not flow:
+        return None
+    ratios = [flow.cr1, flow.cr3, flow.cr5]
+    if any(value is None or value < 0 or value > 100 for value in ratios):
+        return None
+    shares = [float(row.get("share_pct", 0) or 0) for row in flow.top_brokers]
+    if any(value < 0 or value > 100 for value in shares) or sum(shares) > 100.5:
+        return None
+    if flow.cr1 > flow.cr3 or flow.cr3 > flow.cr5:
+        return None
+    return flow
 
 
 def get_foreign_flow_signal(instrument: Instrument) -> str:

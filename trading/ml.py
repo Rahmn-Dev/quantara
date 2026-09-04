@@ -14,7 +14,15 @@ from .models import Candle, ModelRun
 
 FEATURES = ["ret_5", "ret_20", "ret_60", "ret_120", "rvol", "volatility", "sma20_distance", "range_pct", "rsi_14", "bollinger_position", "consecutive_green"]
 ARTIFACT_DIR = Path(settings.BASE_DIR) / "artifacts"
-ARTIFACT_PATH = ARTIFACT_DIR / "champion.joblib"
+LEGACY_ARTIFACT_PATH = ARTIFACT_DIR / "champion.joblib"
+
+
+def artifact_path(profile="NEXT_DAY"):
+    from .strategy_profiles import get_profile
+    path = ARTIFACT_DIR / get_profile(profile)["artifact"]
+    if profile.upper() == "NEXT_DAY" and not path.exists() and LEGACY_ARTIFACT_PATH.exists():
+        return LEGACY_ARTIFACT_PATH
+    return path
 
 
 def _base_model(max_iter=150):
@@ -52,7 +60,7 @@ def _expected_calibration_error(target, probability, bins=10):
     return float(score)
 
 
-def training_frame():
+def training_frame(horizon_days=1):
     rows = Candle.objects.filter(interval="1d").values(
         "instrument_id", "timestamp", "open", "high", "low", "close", "volume"
     )
@@ -82,15 +90,20 @@ def training_frame():
         green = (frame.close > frame.open).astype(int)
         frame["consecutive_green"] = green.groupby((green == 0).cumsum()).cumsum()
         # NEXT DAY target: next close must clear estimated round-trip friction.
-        frame["future_return"] = frame.close.shift(-1) / frame.close - 1 - 0.0045
+        frame["future_return"] = frame.close.shift(-horizon_days) / frame.close - 1 - 0.0045
         frame["target"] = (frame.future_return > 0).astype(int)
         frame["instrument_id"] = instrument_id
         samples.append(frame.dropna(subset=FEATURES + ["future_return"]))
     return pd.concat(samples).sort_values("timestamp").reset_index(drop=True)
 
 
-def train_champion():
-    frame = training_frame()
+def train_champion(profile="NEXT_DAY"):
+    from .strategy_profiles import get_profile
+    profile_name = profile.upper()
+    config = get_profile(profile_name)
+    if config["horizon_days"] < 1:
+        raise ValueError("SCALP requires a dedicated intraday dataset; daily candles are intentionally rejected")
+    frame = training_frame(config["horizon_days"])
     if len(frame) < 500:
         raise ValueError("At least 500 leakage-safe samples are required")
     split_dates = frame.timestamp.drop_duplicates().sort_values()
@@ -101,7 +114,7 @@ def train_champion():
         train, test = frame[frame.timestamp < split], frame[frame.timestamp >= split]
         model, calibration_start = _fit_time_calibrated(train)
         probability = model.predict_proba(test[FEATURES])[:, 1]
-        prediction = probability >= settings.QUANT_LIMITS["min_ml_probability"]
+        prediction = probability >= config["min_probability"]
         fold_metrics.append(
             {
                 "split": str(split),
@@ -119,18 +132,20 @@ def train_champion():
         )
     champion, champion_calibration_start = _fit_time_calibrated(frame, max_iter=200)
     ARTIFACT_DIR.mkdir(exist_ok=True)
-    joblib.dump({"model": champion, "features": FEATURES}, ARTIFACT_PATH)
+    target_path = ARTIFACT_DIR / config["artifact"]
+    joblib.dump({"model": champion, "features": FEATURES, "profile": profile_name, "horizon_days": config["horizon_days"]}, target_path)
     load_champion.cache_clear()
     mean_auc = float(np.mean([fold["auc"] for fold in fold_metrics]))
     return ModelRun.objects.create(
-        samples=len(frame),
+        name=f"hist_gradient_boosting_{profile_name.lower()}", samples=len(frame),
         features=FEATURES,
         metrics={
             "walk_forward": fold_metrics,
             "mean_auc": round(mean_auc, 4),
             "positive_rate": round(float(frame.target.mean()), 4),
-            "target_horizon_days": 1,
-            "target_definition": "next_close_return_after_0.45pct_friction_positive",
+            "profile": profile_name,
+            "target_horizon_days": config["horizon_days"],
+            "target_definition": f"close_t_plus_{config['horizon_days']}_return_after_0.45pct_friction_positive",
             "calibration": "sigmoid_temporal_holdout",
             "calibration_start": champion_calibration_start,
             "mean_brier": round(float(np.mean([fold["brier"] for fold in fold_metrics])), 4),
@@ -138,19 +153,19 @@ def train_champion():
                 float(np.mean([fold["calibration_error"] for fold in fold_metrics])), 4
             ),
         },
-        artifact_path=str(ARTIFACT_PATH),
+        artifact_path=str(target_path),
     )
 
 
-@lru_cache(maxsize=1)
-def load_champion():
-    return joblib.load(ARTIFACT_PATH)
+@lru_cache(maxsize=4)
+def load_champion(profile="NEXT_DAY"):
+    return joblib.load(artifact_path(profile))
 
 
-def predict_probability(snapshot):
-    if not ARTIFACT_PATH.exists():
+def predict_probability(snapshot, profile="NEXT_DAY"):
+    if not artifact_path(profile).exists():
         return None
-    bundle = load_champion()
+    bundle = load_champion(profile.upper())
     # Map the live snapshot into the subset measurable at decision time.
     vector = pd.DataFrame(
         [

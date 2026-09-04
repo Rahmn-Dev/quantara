@@ -2,12 +2,14 @@ from celery import shared_task
 from decimal import Decimal
 from datetime import timedelta
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
+from django.db.models import OuterRef, Subquery
 from django.utils import timezone
 
 from .evaluation import evaluate_predictions
 from .market_data import YahooMarketData
-from .models import Candle, DemoAccount, DemoOrder, DemoPosition, PerformanceSnapshot, TradePlan
+from .models import Candle, DemoAccount, DemoOrder, DemoPosition, Instrument, PerformanceSnapshot, TradePlan
 from .scanner import scan_market
 from .services import broadcast_plans
 
@@ -30,19 +32,21 @@ def market_collection_active(now=None, preopen_minutes=3):
 
 @shared_task
 def build_daily_plan():
-    run = scan_market(decision_window="CLOSE_FINAL")
-    return {"scanned": run.instruments_scanned, "paper_orders": auto_paper_trade_plans("CLOSE_FINAL")}
+    daily = scan_market(decision_window="CLOSE_FINAL", strategy_profile="NEXT_DAY")
+    swing = scan_market(decision_window="CLOSE_FINAL", strategy_profile="SWING", sync=False)
+    return {"daily_scanned": daily.instruments_scanned, "swing_scanned": swing.instruments_scanned,
+            "paper_orders": auto_paper_trade_plans("CLOSE_FINAL")}
 
 
 @shared_task
 def build_open_plan():
-    run = scan_market(decision_window="OPEN_0930")
+    run = scan_market(decision_window="OPEN_0930", strategy_profile="NEXT_DAY")
     return {"scanned": run.instruments_scanned, "paper_orders": auto_paper_trade_plans("OPEN_0930")}
 
 
 @shared_task
 def build_midday_plan():
-    run = scan_market(decision_window="MIDDAY_1130")
+    run = scan_market(decision_window="MIDDAY_1130", strategy_profile="NEXT_DAY")
     return {"scanned": run.instruments_scanned, "paper_orders": auto_paper_trade_plans("MIDDAY_1130")}
 
 
@@ -55,8 +59,15 @@ def auto_paper_trade_plans(decision_window):
     plans = (TradePlan.objects.filter(trading_date=timezone.localdate(), decision_window=decision_window)
              .select_related("instrument").order_by("-ranking_score")[:settings.AUTO_PAPER_TRADING["top_n"]])
     filled = 0
-    performance = PerformanceSnapshot.objects.order_by("-computed_at").first()
-    edge_validated = bool(performance and performance.profit_factor >= 1.2 and performance.expectancy > 0)
+    strategy = plans.first().strategy if plans.exists() else None
+    performance = (
+        PerformanceSnapshot.objects.filter(strategy=strategy).order_by("-computed_at").first()
+        if strategy else None
+    )
+    edge_validated = bool(
+        performance and performance.trades >= 100
+        and performance.profit_factor >= 1.2 and performance.expectancy > 0
+    )
     for plan in plans:
         if DemoOrder.objects.filter(trade_plan=plan, side="BUY").exists():
             continue
@@ -129,16 +140,102 @@ def collect_intraday_candidates():
     if not market_collection_active():
         return "market closed; collector idle"
     provider = YahooMarketData()
-    plans = TradePlan.objects.filter(trading_date=timezone.localdate()).select_related("instrument")
+    plan_instruments = list(Instrument.objects.filter(tradeplan__trading_date=timezone.localdate()).distinct())
+    paper_instruments = list(Instrument.objects.filter(demoposition__status="OPEN").distinct())
+    latest_daily = Candle.objects.filter(instrument=OuterRef("pk"), interval="1d").order_by("-timestamp")
+    liquid_ids = list(Instrument.objects.filter(is_active=True).annotate(
+        latest_volume=Subquery(latest_daily.values("volume")[:1])
+    ).exclude(latest_volume=None).order_by("-latest_volume").values_list("id", flat=True)[:240])
+    cursor = int(cache.get("intraday-rotation-cursor", 0)) % max(1, len(liquid_ids))
+    batch_ids = liquid_ids[cursor:cursor + 8]
+    if len(batch_ids) < 8:
+        batch_ids += liquid_ids[:8 - len(batch_ids)]
+    cache.set("intraday-rotation-cursor", cursor + 8, None)
+    instruments = {item.id: item for item in plan_instruments}
+    instruments.update({item.id: item for item in paper_instruments})
+    instruments.update({item.id: item for item in Instrument.objects.filter(id__in=batch_ids)})
     synced = 0
-    for plan in plans:
+    for instrument in instruments.values():
         try:
-            provider.sync(plan.instrument, period="5d", interval="5m")
+            provider.sync(instrument, period="5d", interval="5m")
             synced += 1
         except Exception:
             continue
     validate_live_setups.delay()
+    auto_close_paper_positions.delay()
     return synced
+
+
+@shared_task
+@transaction.atomic
+def auto_close_paper_positions():
+    """Enforce stop, target, and time expiry for simulated positions."""
+    now = timezone.localtime()
+    if now.weekday() >= 5:
+        return "non-trading day; no close"
+    today = now.date()
+    cutoff_minute = 15 * 60 + (40 if now.weekday() == 4 else 45)
+    current_minute = now.hour * 60 + now.minute
+    closed = []
+    positions = DemoPosition.objects.select_for_update().filter(status="OPEN").select_related(
+        "account", "instrument", "trade_plan"
+    )
+    for position in positions:
+        plan = position.trade_plan
+        if not plan:
+            continue
+        latest = Candle.objects.filter(
+            instrument=position.instrument, interval="5m"
+        ).order_by("-timestamp").first()
+        if (not latest or timezone.localdate(latest.timestamp) != today
+                or latest.timestamp <= position.opened_at):
+            continue
+        strategy = plan.strategy
+        reason, fill = None, None
+        # If stop and target occur inside the same bar, assume stop first. That
+        # conservative ordering avoids optimistic OHLC backfill.
+        if latest.low <= plan.stop_loss:
+            reason = "STOP_LOSS"
+            fill = min(Decimal(latest.open), Decimal(plan.stop_loss)) * Decimal("0.999")
+        elif latest.high >= plan.take_profit:
+            reason = "TAKE_PROFIT"
+            fill = Decimal(plan.take_profit) * Decimal("0.999")
+        else:
+            is_daily = strategy in {"next_day", "momentum"}
+            elapsed_sessions = (
+                Candle.objects.filter(instrument=position.instrument, interval="1d",
+                                      timestamp__date__gt=plan.trading_date)
+                .values("timestamp__date").distinct().count()
+            )
+            swing_expired = strategy == "swing_5d" and elapsed_sessions >= 5
+            if current_minute >= cutoff_minute and (is_daily or swing_expired):
+                reason = "TIME_EXIT_DAILY" if is_daily else "TIME_EXIT_SWING"
+                fill = Decimal(latest.close) * Decimal("0.999")
+        if not reason:
+            continue
+        shares = position.shares
+        proceeds = fill * shares
+        exit_fee = proceeds * Decimal("0.0025")
+        pnl = proceeds - exit_fee - position.entry_price * shares - position.entry_fee
+        position.exit_price = fill; position.exit_fee = exit_fee; position.realized_pnl = pnl
+        position.closed_at = timezone.now(); position.status = "CLOSED"; position.save()
+        account = position.account; account.cash += proceeds - exit_fee; account.realized_pnl += pnl
+        account.save(update_fields=["cash", "realized_pnl", "updated_at"])
+        DemoOrder.objects.create(
+            account=account, instrument=position.instrument, trade_plan=plan, position=position,
+            side="SELL", status=DemoOrder.Status.FILLED,
+            requested_lots=shares // 100, filled_lots=shares // 100,
+            reference_price=latest.close, fill_price=fill, slippage_percent=0.001,
+            fee=exit_fee, filled_at=timezone.now(), reason=reason,
+            metadata={
+                "entry_price": float(position.entry_price), "allocated_entry_fee": float(position.entry_fee),
+                "realized_pnl": float(pnl),
+                "net_return": float(pnl / (position.entry_price * shares)) if position.entry_price else 0,
+                "partial_close": False, "trigger_candle": latest.timestamp.isoformat(),
+            },
+        )
+        closed.append(f"{position.instrument.symbol}:{reason}")
+    return {"closed": closed, "count": len(closed)}
 
 
 @shared_task

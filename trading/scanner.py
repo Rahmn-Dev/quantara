@@ -57,13 +57,18 @@ from .models import (
 )
 from .services import broadcast_plans
 from .evaluation import evaluate_predictions
+from .strategy_profiles import get_profile
 
 
 def scan_market(
     *, equity=100_000_000, sync=True, verbose=False, min_ml_probability=None,
     min_rr=None, max_risk=None, max_daily_loss=None, min_score=None,
-    min_profit_factor=None, decision_window=None
+    min_profit_factor=None, decision_window=None, strategy_profile="NEXT_DAY"
 ):
+    strategy_profile = strategy_profile.upper()
+    profile = get_profile(strategy_profile)
+    if strategy_profile == "SCALP":
+        raise ValueError("SCALP scanner requires the dedicated intraday pipeline")
     if decision_window is None:
         now = timezone.localtime()
         decision_window = "OPEN_0930" if now.hour < 10 else ("MIDDAY_1130" if now.hour < 15 else "CLOSE_FINAL")
@@ -74,11 +79,11 @@ def scan_market(
     limits = settings.QUANT_LIMITS
     effective = {
         "min_signal_score": float(min_score if min_score is not None else limits["min_signal_score"]),
-        "min_ml_probability": float(min_ml_probability if min_ml_probability is not None else limits["min_ml_probability"]),
-        "min_risk_reward": float(min_rr if min_rr is not None else limits["min_risk_reward"]),
+        "min_ml_probability": float(min_ml_probability if min_ml_probability is not None else profile["min_probability"]),
+        "min_risk_reward": float(min_rr if min_rr is not None else max(limits["min_risk_reward"], profile["min_rr"])),
         "max_risk_per_trade": float(max_risk if max_risk is not None else limits["max_risk_per_trade"]),
         "max_daily_loss": float(max_daily_loss if max_daily_loss is not None else limits["max_daily_loss"]),
-        "min_profit_factor": float(min_profit_factor if min_profit_factor is not None else limits["min_profit_factor"]),
+        "min_profit_factor": max(1.20, float(min_profit_factor if min_profit_factor is not None else limits["min_profit_factor"])),
         "equity": float(equity),
         "quant_weights": {"momentum": 0.20, "relative_volume": 0.15, "vwap": 0.15, "volatility": 0.15, "liquidity": 0.15, "broker_flow": 0.20},
     }
@@ -141,20 +146,23 @@ def scan_market(
                 min_score=effective["min_signal_score"], min_rr=effective["min_risk_reward"],
                 max_risk=effective["max_risk_per_trade"], max_daily_loss=effective["max_daily_loss"],
                 fundamental=fundamental,
+                holding_days=profile["horizon_days"],
             )
             # Phase 3: attach foreign flow signal
             foreign_signal = get_foreign_flow_signal(instrument)
-            decisions.append((decision, predict_probability(snapshot), snapshot, foreign_signal, fundamental))
+            decisions.append((decision, predict_probability(snapshot, strategy_profile), snapshot, foreign_signal, fundamental))
         except Exception as exc:  # noqa: BLE001 - one bad ticker must not abort the market scan
             errors.append(f"{instrument.symbol}: {exc}")
     trading_date = timezone.localdate()
-    TradePlan.objects.filter(trading_date=trading_date, strategy="momentum", decision_window=decision_window).delete()
+    TradePlan.objects.filter(trading_date=trading_date, strategy=profile["db_strategy"], decision_window=decision_window).delete()
     performance = (
-        PerformanceSnapshot.objects.filter(strategy="momentum_20d_rvol")
+        PerformanceSnapshot.objects.filter(strategy=profile["db_strategy"])
         .order_by("-computed_at")
         .first()
     )
-    model_run = ModelRun.objects.order_by("-trained_at").first()
+    model_run = ModelRun.objects.filter(name=f"hist_gradient_boosting_{strategy_profile.lower()}").order_by("-trained_at").first()
+    if model_run is None and strategy_profile == "NEXT_DAY":
+        model_run = ModelRun.objects.order_by("-trained_at").first()
     # Keep one coherent latest snapshot. Seven candidates remain readable in
     # the playbook while giving the user more breadth than the old top-five cap.
     ranked = sorted(
@@ -178,13 +186,12 @@ def scan_market(
             values["checks"]["walk_forward"] = False
             values["veto_reasons"].append("ML Walk-Forward AUC Below 0.52")
         profit_factor_gate = effective["min_profit_factor"]
-        if performance and (
-            performance.profit_factor < profit_factor_gate or performance.expectancy <= 0
-        ):
+        if (not performance or performance.trades < 100
+                or performance.profit_factor < profit_factor_gate or performance.expectancy <= 0):
             values["status"] = "WAIT"
             values["checks"]["validated_edge"] = False
             values["veto_reasons"].append(
-                f"Strategy Profit Factor Below {profit_factor_gate:.2f} Or Expectancy Non-Positive"
+                f"{strategy_profile} needs >=100 OOS trades, PF >= {profit_factor_gate:.2f}, and positive expectancy"
             )
 
         # Express useful progression without pretending a watchlist candidate
@@ -241,7 +248,7 @@ def scan_market(
         plan, _ = TradePlan.objects.update_or_create(
             instrument=instrument,
             trading_date=trading_date,
-            strategy="momentum",
+            strategy=profile["db_strategy"],
             decision_window=decision_window,
             defaults={
                 **values,
@@ -261,7 +268,7 @@ def scan_market(
                 instrument=instrument,
                 signal_date=trading_date,
                 model_name=model_run.name if model_run else "unversioned",
-                horizon_days=1,
+                horizon_days=profile["horizon_days"],
                 decision_window=decision_window,
                 defaults={
                     "trade_plan": plan,
@@ -274,6 +281,7 @@ def scan_market(
                         "scan_settings": effective,
                         "ranking_score": ranking_score,
                         "decision_window": decision_window,
+                        "strategy_profile": strategy_profile,
                         "checks": values["checks"],
                         "veto_reasons": values["veto_reasons"],
                     },

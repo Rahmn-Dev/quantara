@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="{% static 'mini.css' %}">
   <link rel="stylesheet" href="{% static 'final.css' %}">
   <link rel="stylesheet" href="{% static 'dashboard.css' %}">
-  <link rel="stylesheet" href="{% static 'dashboard-v2.css' %}?v=47">
+  <link rel="stylesheet" href="{% static 'dashboard-v2.css' %}?v=49">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 
@@ -100,6 +100,7 @@
             <span class="truth">Quant decides · Risk vetoes · AI explains</span>
           </div>
         </div>
+        <div id="strategy-tabs" class="strategy-tabs" aria-label="Trading strategy"></div>
         <div id="playbook-windows" class="window-tabs" aria-label="Decision window"></div>
         <div id="plans" class="plans custom-scroll">
           <div class="empty">No plan yet. Run the market scan.</div>
@@ -156,8 +157,7 @@
             <p class="eyebrow">ZERO-MONEY EXECUTION</p>
             <h2>Paper Trading Account</h2>
           </div>
-          <div class="paper-account-tools"><span class="truth">Simulation · fees included · no broker
-              connection</span><button type="button" id="edit-paper-capital" class="dark-btn">Edit Modal</button></div>
+          <div class="paper-account-tools"><span class="truth">Simulation · fees included · Daily auto-exit: STOP / TARGET / 15:45 WIB</span><button type="button" id="edit-paper-capital" class="dark-btn">Edit Modal</button></div>
         </div>
         <div id="paper-capital-editor" class="paper-capital-editor" hidden><label><span>Modal awal (Rp)</span><input
               id="paper-capital-input" type="number" min="1000000" max="10000000000" step="1000000"
@@ -181,7 +181,7 @@
             <p class="eyebrow">IDX-BEI INTEGRATION · BANDARMOLOGI</p>
             <h2>🏦 Broker Dominance &amp; Smart Money Flow</h2>
           </div>
-          <span class="truth">Data scraped live from IDX API · CR = Concentration Ratio</span>
+          <span class="truth">Validated provider data only · CR = Concentration Ratio</span>
         </div>
         <div id="bandarmologi-cards" class="bandarmologi-grid">
           <div class="empty">Run a market scan to load bandarmologi data.</div>
@@ -284,11 +284,11 @@
           <div class="metric-guide-grid">
             <article><b>AUC</b>
               <p>Kemampuan model membedakan saham yang naik dan tidak. <strong>0,50 = acak</strong>; makin mendekati 1
-                makin baik. Nilai 0,5625 berarti ada sinyal kecil, belum kuat.</p>
+                makin baik. Nilainya harus stabil di beberapa periode, bukan hanya tinggi pada satu pengujian.</p>
             </article>
             <article><b>Profit Factor</b>
-              <p>Total laba kotor dibagi total rugi kotor. <strong>1,00 = impas</strong>; 1,163 berarti setiap Rp1 rugi
-                menghasilkan sekitar Rp1,163 laba kotor sebelum biaya.</p>
+              <p>Total laba kotor dibagi total rugi kotor. <strong>1,00 = impas</strong>; di bawah 1 berarti strategi
+                masih kehilangan uang pada backtest, sedangkan di atas 1 berarti laba kotor melampaui rugi.</p>
             </article>
             <article><b>Accuracy</b>
               <p>Persentase seluruh tebakan yang benar. Bisa menyesatkan bila jumlah kelas naik dan turun tidak
@@ -301,6 +301,14 @@
             <article><b>Engine Quality</b>
               <p>Skor gabungan konservatif: 35% AUC, 30% Profit Factor, 20% journal yang disusutkan karena sampel kecil,
                 dan 15% drawdown. Ini <strong>bukan peluang pasti menang</strong>.</p>
+            </article>
+            <article><b>Maximum Drawdown</b>
+              <p>Penurunan terbesar equity dari puncak ke titik terendah. Makin dekat ke 0% makin baik. Angka ini
+                diperbarui ketika backtest strategi yang sama dijalankan ulang, bukan setiap paper trade masuk.</p>
+            </article>
+            <article><b>Equity Curve</b>
+              <p>Perjalanan modal simulasi selama backtest. Kurva turun berarti strategi historis merugi; ini bukan
+                indikator progres training dan tidak otomatis membaik hanya karena paper trading bertambah.</p>
             </article>
           </div>
         </details>
@@ -361,6 +369,15 @@
             <tbody id="journal-history-body"></tbody>
           </table>
         </div>
+        <div class="journal-group-heading history paper-proof-heading">
+          <div><span class="journal-state-dot verified"></span><b>Verified Paper Executions</b><small>Posisi yang benar-benar ditutup di akun simulasi</small></div><strong id="paper-proof-summary">No closed trades</strong>
+        </div>
+        <div class="table-wrap custom-scroll journal-history-wrap">
+          <table class="dark-table journal-table">
+            <thead><tr><th>Close Time</th><th>Symbol</th><th>Lot</th><th>Entry</th><th>Exit</th><th>Fee Jual</th><th>Realized P&amp;L</th><th>Return</th><th>Proof</th></tr></thead>
+            <tbody id="paper-history-body"></tbody>
+          </table>
+        </div>
       </section>
 
       <footer class="span-col-12 text-muted">
@@ -378,7 +395,7 @@
     <div id="terminal-logs" class="terminal-logs custom-scroll"></div>
   </div>
 
-  <script src="{% static 'app.js' %}?v=46"></script>
+  <script src="{% static 'app.js' %}?v=52"></script>
 </body>
 
 </html>

@@ -51,6 +51,8 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 DATABASES = {"default": env.db("DATABASE_URL", default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}")}
+if DATABASES["default"]["ENGINE"] == "django.db.backends.sqlite3":
+    DATABASES["default"].setdefault("OPTIONS", {})["timeout"] = 30
 AUTH_PASSWORD_VALIDATORS = []
 LANGUAGE_CODE = "id-id"
 TIME_ZONE = "Asia/Jakarta"
@@ -72,8 +74,23 @@ CHANNEL_LAYERS = (
     if REDIS_URL
     else {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
 )
-CELERY_BROKER_URL = REDIS_URL or "memory://"
-CELERY_RESULT_BACKEND = REDIS_URL or "cache+memory://"
+if REDIS_URL:
+    CELERY_BROKER_URL = REDIS_URL
+    CELERY_RESULT_BACKEND = REDIS_URL
+else:
+    # Kombu's memory transport is process-local: embedded Beat can enqueue jobs
+    # that the worker never sees. A filesystem queue keeps local PM2 scheduling
+    # functional without Redis; production should set REDIS_URL.
+    CELERY_QUEUE_DIR = BASE_DIR / ".runtime" / "celery-queue"
+    CELERY_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    CELERY_BROKER_URL = "filesystem://"
+    CELERY_BROKER_TRANSPORT_OPTIONS = {
+        "data_folder_in": str(CELERY_QUEUE_DIR),
+        "data_folder_out": str(CELERY_QUEUE_DIR),
+        "control_folder": str(CELERY_QUEUE_DIR),
+        "store_processed": False,
+    }
+    CELERY_RESULT_BACKEND = "cache+memory://"
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_BEAT_SCHEDULE = {
     "build-open-0930-plan": {
@@ -87,6 +104,10 @@ CELERY_BEAT_SCHEDULE = {
     "collect-intraday-candidates": {
         "task": "trading.tasks.collect_intraday_candidates",
         "schedule": crontab(minute="*/5", hour="9-15", day_of_week="1-5"),
+    },
+    "reconcile-paper-exits": {
+        "task": "trading.tasks.auto_close_paper_positions",
+        "schedule": crontab(minute="0,5,10,15,20,25,30", hour="16", day_of_week="1-5"),
     },
     "prepare-tomorrow-plan": {
         "task": "trading.tasks.build_daily_plan",

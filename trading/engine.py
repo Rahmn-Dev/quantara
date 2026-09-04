@@ -57,14 +57,18 @@ def quant_score(s: Snapshot) -> float:
     # Broker flow: rescale 0-100 score → 0-100 contribution
     # Falls back to neutral (50) when no IDX data yet
     broker_flow = clamp(s.broker_flow_score)
+    broker_available = abs(broker_flow - 50.0) > 1e-9
+    # Missing/invalid broker data must not contribute a constant 10 points.
+    broker_weight = 0.20 if broker_available else 0.0
+    scale = 1.0 / (1.0 - 0.20) if not broker_available else 1.0
     base = (
-        0.20 * momentum          # was 0.28; reduced for broker flow
-        + 0.15 * volume          # was 0.21
+        0.20 * momentum
+        + 0.15 * volume
         + 0.15 * vwap            # was 0.17
         + 0.15 * volatility      # was 0.13
         + 0.15 * s.liquidity_score
-        + 0.20 * broker_flow     # EMPOWERED: 20% weight for Bandar dominance
-    )
+        + broker_weight * broker_flow
+    ) * scale
     # Prevent trend-following from becoming blind performance chasing.
     penalty = 0.0
     penalty += max(0.0, s.rsi_14 - 70) * 0.65
@@ -86,13 +90,18 @@ def create_decision(
     max_risk=0.01,
     max_daily_loss=0.02,
     fundamental: dict | None = None,
+    holding_days: int = 1,
 ) -> Decision:
     if not all(isfinite(v) for v in asdict(s).values() if isinstance(v, float)) or s.close <= 0:
         raise ValueError("Invalid market snapshot")
     score = quant_score(s)
     entry_low, entry_high = s.close * 0.995, s.close * 1.005
-    stop = s.close * (1 - max(0.018, min(s.atr_percent, 0.06)))
-    target = s.close * (1 + max(0.03, s.atr_percent * 1.8))
+    if holding_days >= 3:
+        stop = s.close * (1 - max(0.025, min(s.atr_percent * 1.25, 0.08)))
+        target = s.close * (1 + max(0.06, min(s.atr_percent * 3.2, 0.20)))
+    else:
+        stop = s.close * (1 - max(0.018, min(s.atr_percent, 0.06)))
+        target = s.close * (1 + max(0.03, s.atr_percent * 1.8))
     rr = (target - s.close) / (s.close - stop)
     risk_per_share = s.close - stop
     size = max(0, int((equity * max_risk) / risk_per_share) // 100 * 100)

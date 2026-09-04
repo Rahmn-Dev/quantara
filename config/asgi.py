@@ -7,9 +7,8 @@ from django.conf import settings
 from django.contrib.staticfiles.handlers import ASGIStaticFilesHandler
 from django.core.asgi import get_asgi_application
 
-import trading.routing
-
 django_asgi_app = get_asgi_application()
+import trading.routing
 if settings.DEBUG:
     django_asgi_app = ASGIStaticFilesHandler(django_asgi_app)
 

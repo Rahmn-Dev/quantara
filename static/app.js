@@ -4,6 +4,7 @@ let latestPlanSymbols = [];
 let latestJournalRows = [];
 let currentPlansBySymbol = {};
 let selectedPlanWindow = "";
+let selectedStrategy = "NEXT_DAY";
 let selectedJournalWindow = "CLOSE_FINAL";
 const windowLabels = {OPEN_0930:"OPEN 09:30",MIDDAY_1130:"MIDDAY 11:30",CLOSE_FINAL:"CLOSE FINAL",LEGACY:"LEGACY"};
 const formatDate = (d) => new Date(d).toLocaleDateString("id-ID", { day: 'numeric', month: 'long', year: 'numeric' });
@@ -46,8 +47,14 @@ function technicalEvidence(plan) {
 
 async function load() {
   try {
-    const response = await fetch(`/api/today/${selectedPlanWindow ? `?window=${selectedPlanWindow}` : ""}`);
+    const params = new URLSearchParams({strategy:selectedStrategy});
+    if (selectedPlanWindow) params.set("window",selectedPlanWindow);
+    const response = await fetch(`/api/today/?${params}`);
     const data = await response.json();
+    selectedStrategy = data.selected_strategy;
+    const strategyLabels={NEXT_DAY:"DAILY / NEXT DAY",SWING:"SWING 3–5D",SCALP:"SCALP INTRADAY"};
+    document.querySelector("#strategy-tabs").innerHTML=data.available_strategies.map(value=>`<button type="button" data-strategy="${value}" class="${value===selectedStrategy?"active":""}">${strategyLabels[value]}${value==="SCALP"&&!data.scalp_data_ready?' · COLLECTING':''}</button>`).join("");
+    document.querySelectorAll("[data-strategy]").forEach(button=>button.onclick=()=>{selectedStrategy=button.dataset.strategy;selectedPlanWindow="";load();loadSystem();});
     selectedPlanWindow = data.selected_window;
     document.querySelector("#playbook-windows").innerHTML = ["OPEN_0930","MIDDAY_1130","CLOSE_FINAL"].map(value => `<button type="button" data-plan-window="${value}" class="${value === selectedPlanWindow ? "active" : ""}" ${data.available_windows.includes(value) ? "" : "disabled"}>${windowLabels[value]}</button>`).join("");
     document.querySelectorAll("[data-plan-window]").forEach(button => button.onclick = () => { selectedPlanWindow=button.dataset.planWindow; load(); });
@@ -73,7 +80,7 @@ async function load() {
           <div class="technical-evidence" hidden>${technicalEvidence(plan)}</div>
           <div class="plan-commentary" hidden><div class="insight-heading"><strong>AI Insight</strong><span>AI explains · Quant & risk stay authoritative</span></div><div class="insight-content">${plan.commentary ? marked.parse(plan.commentary) : ""}</div></div>
         </article>`).join("")
-      : '<div class="empty">No plan yet. Run the market scan.</div>';
+      : `<div class="empty">${selectedStrategy==="SCALP"&&!data.scalp_data_ready?"SCALP sedang mengumpulkan dataset 5 menit. Sistem tidak akan membuat probabilitas intraday palsu.":"Belum ada hasil untuk strategi ini. Jalankan market scan."}</div>`;
     if (data.plans.length && !data.plans.some((plan) => plan.status === "READY")) {
       document.querySelector("#plans").insertAdjacentHTML("afterbegin", '<div class="no-trade-banner"><b>NO TRADE</b><span>Tidak ada kandidat yang melewati seluruh ML, backtest, intraday, dan risk gate. Daftar di bawah hanya watchlist.</span></div>');
     }
@@ -83,7 +90,7 @@ async function load() {
     if (data.plans.length) loadChart(data.plans[0].symbol);
     data.plans.forEach((plan) => loadMiniChart(plan.symbol));
     latestPlanSymbols = data.plans.map((plan) => plan.symbol);
-    refreshDashboardPrices();
+    sendMarketSubscription();
     bindInsightButtons();
     bindTechnicalButtons();
     bindPaperButtons();
@@ -186,15 +193,17 @@ function bindPaperButtons() {
   });
 }
 
+let paperAccountState = null;
 async function loadDemoAccount() {
   const response = await fetch("/api/demo-account/"); const data = await response.json();
+  paperAccountState = data;
   const pnlClass = (n) => Number(n) > 0 ? "price-up" : Number(n) < 0 ? "price-down" : "price-flat";
-  document.querySelector("#paper-summary").innerHTML = [["EQUITY",data.equity],["CASH",data.cash],["MARKET VALUE",data.market_value],["UNREALIZED P&L",data.unrealized_pnl],["REALIZED P&L",data.realized_pnl]].map(([label,value]) => `<article><small>${label}</small><strong class="${label.includes("P&L") ? pnlClass(value) : ""}">${money(value)}</strong></article>`).join("");
-  document.querySelector("#paper-positions").innerHTML = data.positions.length ? `<div class="paper-table-wrap"><table class="paper-position-table"><thead><tr><th>Saham</th><th>Lot</th><th>Avg Entry</th><th>Harga Sekarang</th><th>Modal Beli</th><th>Nilai Pasar</th><th>Unrealized P&amp;L</th><th>Return</th><th>Aksi</th></tr></thead><tbody>${data.positions.map(p => { const invested=Number(p.entry_price)*Number(p.shares); const returnPct=invested ? Number(p.unrealized_pnl)/invested*100 : 0; return `<tr data-paper-symbol="${escapeHtml(p.symbol)}" title="Klik untuk buka di Live Trading Desk"><td data-label="Saham"><b>${escapeHtml(p.symbol)}</b></td><td data-label="Lot">${p.lots}</td><td data-label="Avg Entry">${money(p.entry_price)}</td><td data-label="Harga Sekarang"><strong>${money(p.current_price)}</strong></td><td data-label="Modal Beli">${money(invested)}</td><td data-label="Nilai Pasar">${money(p.market_value)}</td><td data-label="Unrealized P&L"><strong class="${pnlClass(p.unrealized_pnl)}">${money(p.unrealized_pnl)}</strong></td><td data-label="Return"><strong class="${pnlClass(returnPct)}">${returnPct>=0?"+":""}${returnPct.toFixed(2)}%</strong></td><td data-label="Aksi"><div class="paper-close-control"><label><span>Lot ditutup</span><input type="number" min="1" max="${p.lots}" value="${p.lots}" aria-label="Jumlah lot yang ditutup"></label><small>dari ${p.lots}</small><button type="button" data-close-position="${p.id}">Tutup ${p.lots} Lot</button></div></td></tr>`; }).join("")}</tbody></table></div>` : '<div class="empty">Belum ada posisi. Paper Buy hanya tersedia ketika status READY dan harga berada di entry zone.</div>';
+  document.querySelector("#paper-summary").innerHTML = [["EQUITY",data.equity],["CASH",data.cash],["MARKET VALUE",data.market_value],["UNREALIZED P&L",data.unrealized_pnl],["REALIZED P&L",data.realized_pnl]].map(([label,value]) => `<article><small>${label}</small><strong data-paper-summary="${label}" class="${label.includes("P&L") ? pnlClass(value) : ""}">${money(value)}</strong></article>`).join("");
+  document.querySelector("#paper-positions").innerHTML = data.positions.length ? `<div class="paper-table-wrap"><table class="paper-position-table"><thead><tr><th>Saham</th><th>Lot</th><th>Avg Entry</th><th>Harga Sekarang</th><th>Modal Beli</th><th>Nilai Pasar</th><th>Unrealized P&amp;L</th><th>Return</th><th>Aksi</th></tr></thead><tbody>${data.positions.map(p => { const invested=Number(p.entry_price)*Number(p.shares); const returnPct=invested ? Number(p.unrealized_pnl)/invested*100 : 0; return `<tr data-paper-symbol="${escapeHtml(p.symbol)}" data-paper-shares="${p.shares}" data-paper-entry="${p.entry_price}" data-paper-fee="${p.entry_fee}" title="Klik untuk buka di Live Trading Desk"><td data-label="Saham"><b>${escapeHtml(p.symbol)}</b></td><td data-label="Lot">${p.lots}</td><td data-label="Avg Entry">${money(p.entry_price)}</td><td data-label="Harga Sekarang"><strong data-paper-price>${money(p.current_price)}</strong></td><td data-label="Modal Beli">${money(invested)}</td><td data-label="Nilai Pasar" data-paper-value>${money(p.market_value)}</td><td data-label="Unrealized P&L"><strong data-paper-pnl class="${pnlClass(p.unrealized_pnl)}">${money(p.unrealized_pnl)}</strong></td><td data-label="Return"><strong data-paper-return class="${pnlClass(returnPct)}">${returnPct>=0?"+":""}${returnPct.toFixed(2)}%</strong></td><td data-label="Aksi"><div class="paper-close-control"><label><span>Lot ditutup</span><input type="number" min="1" max="${p.lots}" value="${p.lots}" aria-label="Jumlah lot yang ditutup"></label><small>dari ${p.lots}</small><button type="button" data-close-position="${p.id}">Tutup ${p.lots} Lot</button></div></td></tr>`; }).join("")}</tbody></table></div>` : '<div class="empty">Belum ada posisi. Paper Buy hanya tersedia ketika status READY dan harga berada di entry zone.</div>';
   document.querySelectorAll("[data-paper-symbol]").forEach(row => row.onclick = (event) => { if (event.target.closest(".paper-close-control")) return; document.querySelector("#live-symbol").value=row.dataset.paperSymbol; loadLive(true); });
   document.querySelectorAll(".paper-close-control input").forEach(input => input.oninput = () => { const safe=Math.max(1,Math.min(Number(input.max),Number(input.value)||1)); input.value=safe; input.closest(".paper-close-control").querySelector("button").textContent=`Tutup ${safe} Lot`; });
   document.querySelector("#paper-orders").innerHTML = data.orders?.length ? `<div class="paper-table-wrap"><table class="paper-order-table"><thead><tr><th>Waktu</th><th>Saham</th><th>Side</th><th>Status</th><th>Lot</th><th>Referensi</th><th>Fill</th><th>Slippage</th><th>Fee</th><th>Alasan</th></tr></thead><tbody>${data.orders.map(order => `<tr><td>${formatDateTime(order.submitted_at)}</td><td><b>${escapeHtml(order.symbol)}</b></td><td>${order.side}</td><td><span class="order-status ${order.status}">${order.status}</span></td><td>${order.filled_lots}/${order.requested_lots}</td><td>${money(order.reference_price)}</td><td>${order.fill_price ? money(order.fill_price) : "—"}</td><td>${(Number(order.slippage_percent)*100).toFixed(2)}%</td><td>${money(order.fee)}</td><td>${escapeHtml(order.reason)}</td></tr>`).join("")}</tbody></table></div>` : '<div class="empty">Belum ada order baru yang tercatat setelah fitur ledger diaktifkan.</div>';
-  document.querySelectorAll("[data-close-position]").forEach(button => button.onclick = async () => { button.disabled=true; const input=button.closest(".paper-close-control").querySelector("input"); const response=await fetch(`/api/demo-close/${button.dataset.closePosition}/`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({lots:Number(input.value)})}); const result=await response.json(); if(response.ok) loadDemoAccount(); else {button.textContent=result.error || "Rejected"; button.disabled=false;} });
+  document.querySelectorAll("[data-close-position]").forEach(button => button.onclick = async () => { button.disabled=true; const input=button.closest(".paper-close-control").querySelector("input"); const response=await fetch(`/api/demo-close/${button.dataset.closePosition}/`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({lots:Number(input.value)})}); const result=await response.json(); if(response.ok) { await loadDemoAccount(); await loadJournal(); } else {button.textContent=result.error || "Rejected"; button.disabled=false;} });
   const editCapital = document.querySelector("#edit-paper-capital");
   const capitalEditor = document.querySelector("#paper-capital-editor"), capitalInput = document.querySelector("#paper-capital-input"), capitalMessage = document.querySelector("#paper-capital-message");
   editCapital.onclick = () => { capitalInput.value = Math.round(Number(data.starting_cash)); capitalMessage.textContent = ""; capitalEditor.hidden = false; capitalInput.focus(); };
@@ -208,6 +217,7 @@ async function loadDemoAccount() {
     else capitalMessage.textContent = result.error || "Modal gagal diperbarui.";
     saveButton.disabled = false; saveButton.textContent = "Simpan";
   };
+  sendMarketSubscription();
 }
 
 function bindTechnicalButtons() {
@@ -364,6 +374,7 @@ document.querySelector("#scan").onclick = async (event) => {
       min_risk_reward: Number(document.querySelector("#minimum-rr").value),
       min_signal_score: Number(document.querySelector("#quant-score-gate").value),
       min_profit_factor: Number(document.querySelector("#profit-factor-gate").value),
+      strategy: selectedStrategy,
     }) });
     if (!response.ok) throw new Error("Market scan failed");
     await load();
@@ -385,6 +396,7 @@ let planRefreshTimer = null;
 socket.onopen = () => {
   document.querySelector("#live").textContent = "LIVE";
   document.querySelector("#live-card").classList.add("is-live");
+  sendMarketSubscription();
 };
 socket.onmessage = (event) => {
   try {
@@ -399,6 +411,8 @@ socket.onmessage = (event) => {
       p.textContent = data.message;
       logs.appendChild(p);
       logs.scrollTop = logs.scrollHeight;
+    } else if (data.event === "market.snapshot") {
+      applyMarketSnapshot(data);
     } else if (data.event === "plans.updated") {
       // Collapse duplicate/bursty plan events into a single dashboard refresh.
       window.clearTimeout(planRefreshTimer);
@@ -412,6 +426,53 @@ socket.onmessage = (event) => {
     console.warn("Ignored malformed market WebSocket event", e);
   }
 };
+
+function sendMarketSubscription() {
+  if (typeof socket === "undefined" || socket.readyState !== WebSocket.OPEN) return;
+  const liveSymbol = document.querySelector("#live-symbol")?.value?.toUpperCase().trim() || "";
+  const tickerSymbols=[...document.querySelectorAll("[data-tape-symbol]")].map(node=>node.dataset.tapeSymbol);
+  const paperSymbols=(paperAccountState?.positions || []).map(position=>position.symbol);
+  const symbols = [...new Set([...paperSymbols, ...latestPlanSymbols, ...latestJournalRows.map((row) => row.symbol), ...tickerSymbols])].slice(0, 40);
+  socket.send(JSON.stringify({action:"subscribe", symbols, live_symbol:liveSymbol}));
+}
+
+function applyMarketSnapshot(data) {
+  const prices = data.prices || {};
+  document.querySelectorAll("[data-plan-symbol]").forEach((card) => {
+    const quote=prices[card.dataset.planSymbol]; if(!quote) return;
+    const reference=Number(quote.previous_close || currentPlansBySymbol[card.dataset.planSymbol]?.indicators?.close || 0);
+    const move=reference ? (Number(quote.price)/reference-1)*100 : 0;
+    const priceNode=card.querySelector("[data-current-price]"), moveNode=card.querySelector("[data-current-move]");
+    priceNode.textContent=money(quote.price); priceNode.className=move>0?"price-up":move<0?"price-down":"price-flat";
+    moveNode.textContent=`Vs Prev · ${move>0?"+":""}${move.toFixed(2)}%`; moveNode.className=priceNode.className;
+  });
+  document.querySelectorAll("[data-journal-symbol]").forEach((row) => {
+    const quote=prices[row.dataset.journalSymbol]; if(!quote) return;
+    const move=(Number(quote.price)/Number(row.dataset.reference)-1)*100;
+    row.querySelector("[data-journal-current]").textContent=money(quote.price);
+    const moveNode=row.querySelector("[data-journal-live]"); moveNode.textContent=`${move>0?"+":""}${move.toFixed(2)}%`; moveNode.className=move>0?"price-up":move<0?"price-down":"price-flat";
+  });
+  let paperMarketValue=0, paperUnrealized=0;
+  document.querySelectorAll("[data-paper-symbol]").forEach((row)=>{
+    const quote=prices[row.dataset.paperSymbol];
+    const state=(paperAccountState?.positions || []).find(position=>position.symbol===row.dataset.paperSymbol);
+    const price=Number(quote?.price ?? state?.current_price ?? 0), shares=Number(row.dataset.paperShares), entry=Number(row.dataset.paperEntry), fee=Number(row.dataset.paperFee || 0);
+    if(!price || !shares)return;
+    const value=price*shares, invested=entry*shares, pnl=(price-entry)*shares-fee, returnPct=invested?pnl/invested*100:0;
+    paperMarketValue+=value; paperUnrealized+=pnl;
+    row.querySelector("[data-paper-price]").textContent=money(price); row.querySelector("[data-paper-value]").textContent=money(value);
+    const pnlNode=row.querySelector("[data-paper-pnl]"), returnNode=row.querySelector("[data-paper-return]");
+    pnlNode.textContent=money(pnl); pnlNode.className=pnl>0?"price-up":pnl<0?"price-down":"price-flat";
+    returnNode.textContent=`${returnPct>=0?"+":""}${returnPct.toFixed(2)}%`; returnNode.className=pnlNode.className;
+  });
+  if(paperAccountState && document.querySelectorAll("[data-paper-symbol]").length){
+    const cash=Number(paperAccountState.cash), realized=Number(paperAccountState.realized_pnl), values={"EQUITY":cash+paperMarketValue,"CASH":cash,"MARKET VALUE":paperMarketValue,"UNREALIZED P&L":paperUnrealized,"REALIZED P&L":realized};
+    document.querySelectorAll("[data-paper-summary]").forEach(node=>{const value=values[node.dataset.paperSummary];node.textContent=money(value);if(node.dataset.paperSummary.includes("P&L"))node.className=value>0?"price-up":value<0?"price-down":"price-flat";});
+  }
+  const liveSymbol=document.querySelector("#live-symbol")?.value?.toUpperCase().trim(), quote=prices[liveSymbol];
+  if(quote) document.querySelector("#live-decision").innerHTML=`<div class="live-strip ${data.market_active?"":"market-idle"}"><strong>${liveSymbol} · ${money(quote.price)}</strong><span>High ${money(quote.high)}</span><span>Low ${money(quote.low)}</span><span>Volume ${money(quote.volume)}</span><span>${data.market_active?"STREAM LIVE":"FINAL CLOSE"}</span><span>${formatDateTime(quote.market_time)}</span></div>`;
+  document.querySelectorAll("[data-tape-symbol]").forEach((item)=>{const q=prices[item.dataset.tapeSymbol];if(!q)return;const move=(Number(q.price)/Number(q.previous_close)-1)*100;item.querySelector("[data-tape-price]").textContent=money(q.price);const n=item.querySelector("[data-tape-move]");n.textContent=`${move>0?"▲ +":move<0?"▼ ":"• "}${move.toFixed(2)}%`;n.className=move>0?"up":move<0?"down":"flat";});
+}
 socket.onclose = () => {
   document.querySelector("#live").textContent = "OFFLINE";
   document.querySelector("#live-card").classList.remove("is-live");
@@ -444,7 +505,7 @@ async function loadScanner() {
 }
 
 async function loadSystem() {
-  const response = await fetch("/api/system/");
+  const response = await fetch(`/api/system/?strategy=${selectedStrategy}`);
   const data = await response.json();
   const model = data.model, test = data.backtest;
   const quality = data.engine_quality;
@@ -452,16 +513,17 @@ async function loadSystem() {
   document.querySelector("#engine-quality-note").textContent = `${quality.grade} · adjusted from ${quality.evaluated} proofs`;
   document.querySelector("#quality-card").className = `metric-state quality-${quality.grade.toLowerCase()}`;
   document.querySelector("#min-ml-threshold").textContent = `${Math.round(Number(document.querySelector("#ml-threshold").value) * 100)}%`;
-  document.querySelector("#model-metrics").innerHTML = `<article><label>UNIVERSE</label><strong>${money(data.universe)}</strong><small>Active IDX shares</small></article><article><label>ML SAMPLES</label><strong>${money(model?.samples || 0)}</strong><small>${model?.name || "No model"}</small></article><article><label>MEAN AUC</label><strong>${model?.metrics?.mean_auc || "—"}</strong><small>Walk-forward evaluation</small></article><article><label>PROFIT FACTOR</label><strong>${test?.profit_factor || "—"}</strong><small>${test?.trades || 0} tested trades</small></article>`;
+  document.querySelector("#model-metrics").innerHTML = `<article><label>UNIVERSE</label><strong>${money(data.universe)}</strong><small>Active IDX shares</small></article><article><label>ML SAMPLES</label><strong>${money(model?.samples || 0)}</strong><small>${model?.name || "No model"}</small></article><article><label>MEAN AUC</label><strong>${model?.metrics?.mean_auc || "—"}</strong><small>Walk-forward evaluation</small></article><article><label>PROFIT FACTOR</label><strong>${test?.profit_factor || "—"}</strong><small>${test ? `${test.trades} tested trades` : "Not backtested for this strategy"}</small></article><article><label>MAX DRAWDOWN</label><strong class="${test && Number(test.max_drawdown)<-.2?'price-down':''}">${test ? `${(Number(test.max_drawdown)*100).toFixed(1)}%` : "—"}</strong><small>${test ? "Peak-to-trough equity loss" : "Awaiting matched backtest"}</small></article>`;
   const auc = Number(model?.metrics?.mean_auc || 0);
-  const profitFactor = Number(test?.profit_factor || 0);
+  const profitFactor = test ? Number(test.profit_factor) : null;
   const verdict = document.querySelector("#model-verdict");
   const profitFactorGate = Number(data.limits.min_profit_factor);
-  const validated = auc >= 0.55 && profitFactor >= profitFactorGate;
+  const trades = Number(test?.trades || 0), expectancy = Number(test?.expectancy || 0), maxDrawdown = Math.abs(Number(test?.max_drawdown || 1));
+  const validated = auc >= 0.55 && profitFactor !== null && profitFactor >= Math.max(1.2, profitFactorGate) && expectancy > 0 && maxDrawdown <= 0.20 && trades >= 100;
   verdict.className = `model-verdict ${validated ? "pass" : "caution"}`;
   verdict.innerHTML = validated
-    ? `<b>VALIDATED EDGE</b><span>AUC dan Profit Factor melewati batas minimum sistem.</span>`
-    : `<b>EDGE BELUM KUAT</b><span>AUC ${auc.toFixed(4)} hanya sedikit di atas acak atau Profit Factor ${profitFactor.toFixed(3)} belum melewati gate ${profitFactorGate.toFixed(2)}. Risk engine tetap berhak memaksa WAIT.</span>`;
+    ? `<b>VALIDATED EDGE</b><span>AUC, PF, expectancy, drawdown, dan minimal 100 transaksi OOS melewati gate.</span>`
+    : `<b>EDGE BELUM KUAT</b><span>${test ? `Audit OOS: ${trades}/100 transaksi · AUC ${auc.toFixed(4)} · PF ${profitFactor.toFixed(3)} · drawdown ${(maxDrawdown*100).toFixed(1)}%. Hasil yang menjanjikan tetap belum dianggap terbukti sebelum sampelnya cukup.` : `${data.strategy_label} belum memiliki backtest strategi yang sepadan; Profit Factor dan drawdown tidak dipinjam dari strategi lain.`} Risk engine tetap memaksa WAIT.</span>`;
   document.querySelector("#folds").innerHTML = (model?.metrics?.walk_forward || []).map((fold) => `<article><b>${formatDate(fold.split)}</b><span>AUC ${fold.auc}</span><span>Accuracy ${fold.accuracy}</span><span>Precision ${fold.precision}</span><span>${money(fold.samples)} samples</span></article>`).join("");
   renderLine("#equity-chart", test?.equity_curve || [], "#c95050");
 }
@@ -502,6 +564,7 @@ async function loadJournal() {
   const verifiedPercent = data.accuracy == null ? null : Math.round(data.accuracy * 100);
   const activeRows = data.results.filter((row) => row.was_correct == null);
   const historyRows = data.results.filter((row) => row.was_correct != null);
+  const paperRows = data.paper_results || [];
   document.querySelector("#journal-pending-count").textContent = `${activeRows.length} active`;
   document.querySelector("#journal-accuracy").textContent = verifiedPercent == null ? "No verified history" : `${verifiedPercent}% verified accuracy · ${historyRows.length} records`;
   document.querySelector("#proof-ratio").textContent = data.evaluated ? `${Math.round(data.accuracy * data.evaluated)}/${data.evaluated}` : "—";
@@ -512,7 +575,10 @@ async function loadJournal() {
   const renderHistory = rows => rows.length ? rows.map((row) => { const move=Number(row.realized_return||0)*100; return `<tr><td>${formatDate(row.signal_date)}</td><td>${escapeHtml(row.symbol)}</td><td><span class="badge ${row.decision}">${row.decision}</span></td><td>${Math.round(row.probability * 100)}%</td><td>${money(row.reference_price)}</td><td><strong>${money(row.realized_price)}</strong></td><td class="${move>0?"price-up":move<0?"price-down":"price-flat"}">${move>=0?"+":""}${move.toFixed(2)}%</td><td>${row.was_correct ? "✓" : "✕"}</td></tr>`; }).join("") : '<tr><td colspan="8" class="journal-empty">Belum ada prediksi yang selesai dievaluasi.</td></tr>';
   document.querySelector("#journal-active-body").innerHTML = renderActive(activeRows);
   document.querySelector("#journal-history-body").innerHTML = renderHistory(historyRows);
-  refreshDashboardPrices();
+  const paperProfit=paperRows.filter(row=>Number(row.realized_pnl)>0).length, paperPnl=paperRows.reduce((sum,row)=>sum+Number(row.realized_pnl||0),0);
+  document.querySelector("#paper-proof-summary").textContent=paperRows.length ? `${paperProfit}/${paperRows.length} profitable · ${money(paperPnl)}` : "No closed trades";
+  document.querySelector("#paper-history-body").innerHTML=paperRows.length ? paperRows.map(row=>{const pnl=Number(row.realized_pnl||0),ret=Number(row.return||0)*100;return `<tr><td>${formatDateTime(row.closed_at)}</td><td><b>${escapeHtml(row.symbol)}</b></td><td>${row.lots}</td><td>${money(row.entry_price)}</td><td>${money(row.exit_price)}</td><td>${money(row.exit_fee)}</td><td class="${pnl>0?"price-up":pnl<0?"price-down":"price-flat"}">${money(pnl)}</td><td class="${ret>0?"price-up":ret<0?"price-down":"price-flat"}">${ret>=0?"+":""}${ret.toFixed(2)}%</td><td>${pnl>0?"✓ PROFIT":"✕ LOSS"}</td></tr>`;}).join("") : '<tr><td colspan="9" class="journal-empty">Belum ada posisi paper yang ditutup setelah ledger SELL diaktifkan.</td></tr>';
+  sendMarketSubscription();
 }
 
 let dashboardPriceRequestRunning = false;
@@ -599,7 +665,7 @@ document.querySelector("#stock-search").oninput = () => { scannerPage = 1; loadS
 document.querySelector("#status-filter").onchange = () => { scannerPage = 1; loadScanner(); };
 document.querySelector("#prev-page").onclick = () => { scannerPage--; loadScanner(); };
 document.querySelector("#next-page").onclick = () => { scannerPage++; loadScanner(); };
-document.querySelector("#load-live").onclick = () => loadLive(true);
+document.querySelector("#load-live").onclick = () => { sendMarketSubscription(); loadLive(true); };
 document.querySelector("#ml-threshold").onchange = (event) => {
   const percent = Math.round(Number(event.target.value) * 100);
   document.querySelector("#min-ml-threshold").textContent = `${percent}%`;
@@ -686,14 +752,12 @@ document.querySelectorAll("#chart-zoom button").forEach((button) => {
   };
 });
 document.querySelector("#live-symbol").addEventListener("keydown", (event) => {
-  if (event.key === "Enter") loadLive();
+  if (event.key === "Enter") { sendMarketSubscription(); loadLive(true); }
 });
 loadScanner();
 loadSystem();
 loadJournal();
 loadLive(false);
-liveTimer = setInterval(() => loadLive(false), 5000);
-setInterval(() => { if (isIdxFeedWindow()) refreshDashboardPrices(); }, 3000);
 
 let marketTapeRequestRunning = false;
 async function loadMarketTape(force = false) {
@@ -708,7 +772,7 @@ async function loadMarketTape(force = false) {
       const direction = row.change_percent > 0 ? "up" : row.change_percent < 0 ? "down" : "flat";
       const arrow = row.change_percent > 0 ? "▲" : row.change_percent < 0 ? "▼" : "•";
       const sign = row.change_percent > 0 ? "+" : "";
-      return `<span class="tape-item"><b>${escapeHtml(row.symbol)}</b><span>${money(row.price)}</span><strong class="${direction}">${arrow} ${sign}${row.change_percent.toFixed(2)}%</strong></span>`;
+      return `<span class="tape-item" data-tape-symbol="${escapeHtml(row.symbol)}"><b>${escapeHtml(row.symbol)}</b><span data-tape-price>${money(row.price)}</span><strong data-tape-move class="${direction}">${arrow} ${sign}${row.change_percent.toFixed(2)}%</strong></span>`;
     }).join("");
     const track = document.querySelector("#market-tape-track");
     track.innerHTML = `<div class="tape-set">${items}</div><div class="tape-set" aria-hidden="true">${items}</div>`;
@@ -719,6 +783,7 @@ async function loadMarketTape(force = false) {
     track.style.animation = "none";
     void track.offsetWidth;
     track.style.animation = "";
+    sendMarketSubscription();
   } catch (error) {
     console.warn("Market tape refresh failed", error);
   } finally {
@@ -727,7 +792,6 @@ async function loadMarketTape(force = false) {
 }
 
 loadMarketTape(true);
-setInterval(() => loadMarketTape(false), 10000);
 
 function updateMarketTimer() {
   const now = new Date();

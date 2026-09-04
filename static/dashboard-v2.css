@@ -595,6 +595,7 @@ body.dark-dashboard {
 @media(min-width:1401px){.playbook-panel,.chart-panel{height:560px;min-height:560px;max-height:560px}.playbook-panel .plans{max-height:none;min-height:0}.chart-panel #chart{height:auto;min-height:0;flex:1}}
 .no-trade-banner{padding:12px 14px;border:1px solid rgba(255,107,107,.3);border-radius:9px;background:rgba(255,107,107,.07);display:flex;align-items:center;gap:12px}.no-trade-banner b{color:#ff7878;font-size:12px}.no-trade-banner span{color:var(--text-muted);font-size:10px}
 .window-tabs{display:flex;gap:5px;margin:0 0 10px;flex-wrap:wrap}.window-tabs button{padding:7px 10px;border:1px solid var(--panel-border);border-radius:7px;background:rgba(0,0,0,.18);color:var(--text-muted);font:700 9px Outfit,sans-serif;cursor:pointer}.window-tabs button.active{color:#071018;background:var(--accent-lime);border-color:var(--accent-lime)}.window-tabs button:disabled{opacity:.3;cursor:not-allowed}
+.strategy-tabs{display:flex;gap:6px;margin:10px 0 8px;padding:4px;border:1px solid var(--panel-border);border-radius:9px;background:rgba(0,0,0,.18)}.strategy-tabs button{flex:1;padding:8px;border:0;border-radius:6px;background:transparent;color:var(--text-muted);font:800 9px Outfit,sans-serif;cursor:pointer}.strategy-tabs button.active{background:var(--accent-lime);color:#071018;box-shadow:0 0 12px rgba(200,243,108,.16)}
 
 .plan {
   background: rgba(0, 0, 0, 0.2);
@@ -1029,10 +1030,11 @@ footer {
 
 /* Bandarmologi card grid */
 .bandarmologi-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  display: flex;
   gap: 16px;
   padding: 4px 0 8px;
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
 }
 
 .bandar-card {
@@ -1040,12 +1042,17 @@ footer {
   border: 1px solid rgba(255,255,255,0.08);
   border-radius: 14px;
   padding: 16px;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: auto minmax(90px,1fr) minmax(150px,1.4fr);
+  grid-template-rows: auto auto auto;
+  align-items: center;
   gap: 8px;
+  flex: 0 0 min(430px,85vw);
+  scroll-snap-align: start;
   position: relative;
   transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
+.bandar-card-header{grid-column:1/-1}.bandar-score{grid-column:1}.bandar-label{grid-column:1;grid-row:3}.bandar-cr-row{grid-column:2;grid-row:2/4;border-top:0;border-left:1px solid rgba(255,255,255,.06);padding:4px 8px}.bandar-meta{grid-column:3;grid-row:2/4;border-top:0;border-left:1px solid rgba(255,255,255,.06);padding:4px 8px}.bandar-top-brokers{grid-column:1/-1}
 
 .bandar-card:hover {
   transform: translateY(-2px);

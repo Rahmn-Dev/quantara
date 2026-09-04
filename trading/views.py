@@ -4,7 +4,8 @@ from django.shortcuts import get_object_or_404, render
 from django.core.cache import cache
 from django.conf import settings
 from django.utils import timezone
-from django.db import transaction
+from django.db import OperationalError, transaction
+import time
 from decimal import Decimal
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -83,7 +84,12 @@ def market_session():
 @api_view(["GET"])
 def today(request):
     trading_date = timezone.localdate()
-    base_plans = TradePlan.objects.filter(trading_date=trading_date)
+    strategy_profile = request.GET.get("strategy", "NEXT_DAY").upper()
+    from .strategy_profiles import get_profile
+    profile = get_profile(strategy_profile)
+    base_plans = TradePlan.objects.filter(trading_date=trading_date, strategy=profile["db_strategy"])
+    if not base_plans.exists() and strategy_profile == "NEXT_DAY":
+        base_plans = TradePlan.objects.filter(trading_date=trading_date, strategy="momentum")
     available_windows = list(base_plans.order_by().values_list("decision_window", flat=True).distinct())
     requested_window = request.GET.get("window", "").upper()
     preferred = ["CLOSE_FINAL", "MIDDAY_1130", "OPEN_0930", "LEGACY"]
@@ -99,6 +105,10 @@ def today(request):
             "risk_mode": "NORMAL",
             "session": market_session(),
             "selected_window": selected_window,
+            "selected_strategy": strategy_profile,
+            "available_strategies": ["NEXT_DAY", "SWING", "SCALP"],
+            "strategy_label": profile["label"],
+            "scalp_data_ready": Candle.objects.filter(interval="5m").values("instrument_id").distinct().count() >= 200,
             "available_windows": available_windows,
             "data": {
                 "source": scan.source if scan else "demo",
@@ -106,7 +116,7 @@ def today(request):
                 "status": scan.status if scan else "NO_REAL_SCAN",
                 "errors": len(scan.errors) if scan else 0,
             },
-            "model": ModelRun.objects.order_by("-trained_at")
+            "model": ModelRun.objects.filter(name=f"hist_gradient_boosting_{strategy_profile.lower()}").order_by("-trained_at")
             .values("name", "trained_at", "samples", "metrics")
             .first(),
             "plans": TradePlanSerializer(plans, many=True).data,
@@ -151,6 +161,7 @@ def real_scan(request):
         max_daily_loss=max_daily_loss,
         min_score=min_score,
         min_profit_factor=min_profit_factor,
+        strategy_profile=request.data.get("strategy", "NEXT_DAY"),
     )
     return Response(
         {
@@ -382,6 +393,7 @@ def demo_account(request):
         market_value += value; unrealized += pnl
         positions.append({"id": position.id, "symbol": position.instrument.symbol, "shares": position.shares,
                           "lots": position.shares // 100, "entry_price": position.entry_price,
+                          "entry_fee": position.entry_fee,
                           "current_price": price, "market_value": value, "unrealized_pnl": pnl})
     orders = [{"id": order.id, "symbol": order.instrument.symbol, "side": order.side, "status": order.status,
                "requested_lots": order.requested_lots, "filled_lots": order.filled_lots,
@@ -449,9 +461,7 @@ def demo_buy(request, plan_id):
     return Response({"id": position.id, "symbol": plan.instrument.symbol, "lots": lots, "fill_price": price}, status=201)
 
 
-@api_view(["POST"])
-@transaction.atomic
-def demo_close(request, position_id):
+def _demo_close_once(request, position_id):
     position = get_object_or_404(DemoPosition.objects.select_for_update().select_related("account", "instrument"), pk=position_id, status="OPEN")
     price = _paper_price(position.instrument)
     if price is None:
@@ -464,6 +474,7 @@ def demo_close(request, position_id):
     if lots < 1 or lots > open_lots:
         return Response({"error": f"Jumlah lot harus 1–{open_lots}."}, status=400)
     closing_shares = lots * 100
+    is_partial = closing_shares < position.shares
     allocated_entry_fee = position.entry_fee * Decimal(closing_shares) / Decimal(position.shares)
     proceeds = price * closing_shares
     exit_fee = proceeds * Decimal("0.0025")
@@ -477,25 +488,57 @@ def demo_close(request, position_id):
     position.save()
     account = position.account; account.cash += proceeds - exit_fee; account.realized_pnl += pnl
     account.save(update_fields=["cash", "realized_pnl", "updated_at"])
+    DemoOrder.objects.create(
+        trade_plan=position.trade_plan, side="SELL", account=account,
+        instrument=position.instrument, position=position,
+        status=DemoOrder.Status.FILLED, requested_lots=lots, filled_lots=lots,
+        reference_price=price, fill_price=price, fee=exit_fee,
+        filled_at=timezone.now(), reason="manual paper close",
+        metadata={
+            "entry_price": float(position.entry_price),
+            "allocated_entry_fee": float(allocated_entry_fee),
+            "realized_pnl": float(pnl),
+            "net_return": float(pnl / (position.entry_price * closing_shares)) if position.entry_price else 0,
+            "partial_close": is_partial,
+        },
+    )
     return Response({"id": position.id, "closed_lots": lots, "remaining_lots": position.shares // 100 if position.status == "OPEN" else 0,
                      "exit_price": price, "realized_pnl": pnl})
 
 
+@api_view(["POST"])
+def demo_close(request, position_id):
+    for attempt, pause in enumerate((0.15, 0.5, 1.5), start=1):
+        try:
+            with transaction.atomic():
+                return _demo_close_once(request, position_id)
+        except OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == 3:
+                raise
+            time.sleep(pause)
+
+
 @api_view(["GET"])
 def system_status(request):
-    model = ModelRun.objects.order_by("-trained_at").first()
-    performance = PerformanceSnapshot.objects.order_by("-computed_at").first()
+    from .strategy_profiles import get_profile
+    strategy_profile = request.GET.get("strategy", "NEXT_DAY").upper()
+    profile = get_profile(strategy_profile)
+    model = ModelRun.objects.filter(name=f"hist_gradient_boosting_{strategy_profile.lower()}").order_by("-trained_at").first()
+    performance = PerformanceSnapshot.objects.filter(strategy=profile["db_strategy"]).order_by("-computed_at").first()
+    if performance is None and strategy_profile == "NEXT_DAY":
+        performance = PerformanceSnapshot.objects.filter(strategy="momentum_20d_rvol").order_by("-computed_at").first()
     evaluated = PredictionRecord.objects.filter(was_correct__isnull=False)
     evaluated_count = evaluated.count()
     correct_count = evaluated.filter(was_correct=True).count()
     auc = float(model.metrics.get("mean_auc", 0.5)) if model else 0.5
     profit_factor = float(performance.profit_factor) if performance else 0.0
     max_drawdown = abs(float(performance.max_drawdown)) if performance else 1.0
+    evidence_factor = min(1.0, performance.trades / 100) if performance else 0.0
     # Conservative composite: journal uses a 10-observation 50/50 prior so a
     # tiny 4/4 record cannot masquerade as a proven 100% engine.
     auc_quality = max(0.0, min(1.0, (auc - 0.5) / 0.15))
-    profit_quality = max(0.0, min(1.0, (profit_factor - 1.0) / 0.5))
-    drawdown_quality = max(0.0, min(1.0, 1.0 - max_drawdown / 0.30))
+    profit_quality = max(0.0, min(1.0, (profit_factor - 1.0) / 0.5)) * evidence_factor
+    drawdown_quality = max(0.0, min(1.0, 1.0 - max_drawdown / 0.30)) * evidence_factor
     journal_quality = (correct_count + 5) / (evaluated_count + 10)
     engine_quality = round(
         100 * (0.35 * auc_quality + 0.30 * profit_quality + 0.20 * journal_quality + 0.15 * drawdown_quality)
@@ -503,6 +546,8 @@ def system_status(request):
     return Response(
         {
             "universe": Instrument.objects.filter(is_active=True).count(),
+            "strategy_profile": strategy_profile,
+            "strategy_label": profile["label"],
             "candles": Candle.objects.count(),
             "engine_quality": {
                 "score": engine_quality,
@@ -514,6 +559,7 @@ def system_status(request):
                     "profit_factor": round(profit_quality * 100),
                     "journal_adjusted": round(journal_quality * 100),
                     "drawdown": round(drawdown_quality * 100),
+                    "oos_evidence": round(evidence_factor * 100),
                 },
             },
             "limits": settings.QUANT_LIMITS,
@@ -557,12 +603,31 @@ def prediction_history(request):
     records = records.select_related("instrument").order_by("-predicted_at")[:100]
     evaluated = PredictionRecord.objects.filter(was_correct__isnull=False)
     accuracy = evaluated.filter(was_correct=True).count() / evaluated.count() if evaluated else None
+    sell_orders = DemoOrder.objects.filter(side="SELL", status=DemoOrder.Status.FILLED).select_related(
+        "instrument", "position", "trade_plan"
+    ).order_by("-filled_at")[:100]
+    sell_orders = [order for order in sell_orders if not order.metadata.get("evidence_excluded")]
     return Response(
         {
             "evaluated": evaluated.count(),
             "accuracy": accuracy,
             "selected_window": requested_window or "ALL",
             "available_windows": available_windows,
+            "paper_results": [
+                {
+                    "id": order.id, "symbol": order.instrument.symbol,
+                    "opened_at": order.position.opened_at if order.position else None,
+                    "closed_at": order.filled_at, "lots": order.filled_lots,
+                    "entry_price": order.metadata.get("entry_price"),
+                    "exit_price": order.fill_price, "exit_fee": order.fee,
+                    "realized_pnl": order.metadata.get("realized_pnl", 0),
+                    "return": order.metadata.get("net_return", 0),
+                    "result": "PROFIT" if order.metadata.get("realized_pnl", 0) > 0 else "LOSS",
+                    "strategy": order.trade_plan.strategy if order.trade_plan else "manual",
+                    "decision_window": order.trade_plan.decision_window if order.trade_plan else "—",
+                }
+                for order in sell_orders
+            ],
             "results": [
                 {
                     "symbol": row.instrument.symbol,
